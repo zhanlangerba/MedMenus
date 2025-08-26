@@ -1,4 +1,4 @@
-from dotenv import load_dotenv
+from dotenv import load_dotenv # type: ignore
 load_dotenv()
 
 import asyncio
@@ -6,29 +6,22 @@ import time
 import uuid
 import sys
 
-from fastapi import FastAPI, Request, HTTPException, Response, Depends, APIRouter
+from fastapi import FastAPI, Request, HTTPException, Response, Depends, APIRouter # type: ignore
 from utils.logger import logger, structlog
 from datetime import datetime, timezone
 
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.cors import CORSMiddleware # type: ignore
 # from fastapi.responses import JSONResponse, StreamingResponse
 # from services import redis
 # import sentry
-# from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager
 # from agentpress.thread_manager import ThreadManager
-# from services.supabase import DBConnection
-# 
+from services.postgresql import DBConnection
 from utils.config import config, EnvMode
-# 
-# 
-# 
-# from collections import OrderedDict
+from collections import OrderedDict
 # from pydantic import BaseModel
-
-
 from flags import api as feature_flags_api
-# from agent import api as agent_api
-
+from agent import api as agent_api
 # from sandbox import api as sandbox_api
 # from services import billing as billing_api
 # 
@@ -38,79 +31,79 @@ from flags import api as feature_flags_api
 # from triggers import api as triggers_api
 # from services import api_keys_api
 
+# 强制 asyncio 使用 Proactor 事件循环，以确保异步 I/O 的兼容性和稳定性。
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
-# if sys.platform == "win32":
-#     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+# 初始化管理器
+db = DBConnection()
+instance_id = "single"
 
-# # Initialize managers
-# db = DBConnection()
-# instance_id = "single"
+# Rate limiter state
+ip_tracker = OrderedDict()
+MAX_CONCURRENT_IPS = 25
 
-# # Rate limiter state
-# ip_tracker = OrderedDict()
-# MAX_CONCURRENT_IPS = 25
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    logger.info(f"Starting up FastAPI application with instance ID: {instance_id} in {config.ENV_MODE.value} mode")
+    try:
+        # 初始化PostgreSQL数据库连接
+        await db.initialize()
+        logger.info("PostgreSQL数据库连接初始化完成")
+        
+        # 初始化Redis连接
+        from services import redis
+        try:
+            await redis.initialize_async()
+            logger.info("Redis connection initialized successfully")
+        except Exception as e:
+            logger.error(f"Failed to initialize Redis connection: {e}")
 
-# @asynccontextmanager
-# async def lifespan(app: FastAPI):
-#     logger.info(f"Starting up FastAPI application with instance ID: {instance_id} in {config.ENV_MODE.value} mode")
-#     try:
-#         await db.initialize()
-        
-#         agent_api.initialize(
-#             db,
-#             instance_id
-#         )
-        
-        
-#         sandbox_api.initialize(db)
-        
-#         # Initialize Redis connection
-#         from services import redis
-#         try:
-#             await redis.initialize_async()
-#             logger.info("Redis connection initialized successfully")
-#         except Exception as e:
-#             logger.error(f"Failed to initialize Redis connection: {e}")
-#             # Continue without Redis - the application will handle Redis failures gracefully
-        
-#         # Start background tasks
-#         # asyncio.create_task(agent_api.restore_running_agent_runs())
-        
-#         triggers_api.initialize(db)
-#         pipedream_api.initialize(db)
-#         credentials_api.initialize(db)
-#         template_api.initialize(db)
-#         composio_api.initialize(db)
-        
-#         yield
-        
-#         # Clean up agent resources
-#         logger.info("Cleaning up agent resources")
-#         await agent_api.cleanup()
-        
-#         # Clean up Redis connection
-#         try:
-#             logger.info("Closing Redis connection")
-#             await redis.close()
-#             logger.info("Redis connection closed successfully")
-#         except Exception as e:
-#             logger.error(f"Error closing Redis connection: {e}")
-        
-#         # Clean up database connection
-#         logger.info("Disconnecting from database")
-#         await db.disconnect()
-#     except Exception as e:
-#         logger.error(f"Error during application startup: {e}")
-#         raise
+        # 初始化Agent
+        agent_api.initialize(
+            db,
+            instance_id
+        )
 
-# app = FastAPI(lifespan=lifespan)
-app = FastAPI()
+        # Start background tasks
+        # asyncio.create_task(agent_api.restore_running_agent_runs())
+
+        # sandbox_api.initialize(db)
+        
+        
+        # triggers_api.initialize(db)
+        # pipedream_api.initialize(db)
+        # credentials_api.initialize(db)
+        # template_api.initialize(db)
+        # composio_api.initialize(db)
+        
+        yield
+        
+        # 清理Agent资源
+        logger.info("Cleaning up agent resources")
+        await agent_api.cleanup()
+        
+        # 清理Redis连接
+        try:
+            logger.info("Closing Redis connection")
+            await redis.close()
+            logger.info("Redis connection closed successfully")
+        except Exception as e:
+            logger.error(f"Error closing Redis connection: {e}")
+        
+        # 清理数据库连接
+        logger.info("正在断开数据库连接")
+        await db.disconnect()
+    except Exception as e:
+        logger.error(f"Error during application startup: {e}")
+        raise
+
+app = FastAPI(lifespan=lifespan)
 
 
 @app.middleware("http")
 async def log_requests_middleware(request: Request, call_next):
     structlog.contextvars.clear_contextvars()
-
     request_id = str(uuid.uuid4())
     start_time = time.time()
     client_ip = request.client.host if request.client else "unknown"
@@ -126,7 +119,7 @@ async def log_requests_middleware(request: Request, call_next):
         query_params=query_params
     )
 
-    # Log the incoming request
+    # 记录请求
     logger.info(f"Request started: {method} {path} from {client_ip} | Query: {query_params}")
     
     try:
@@ -139,40 +132,34 @@ async def log_requests_middleware(request: Request, call_next):
         logger.error(f"Request failed: {method} {path} | Error: {str(e)} | Time: {process_time:.2f}s")
         raise
 
-# Define allowed origins based on environment
-allowed_origins = ["https://www.suna.so", "https://suna.so"]
+# 定义允许的源
+allowed_origins = ["https://www.example.com", "https://example.com"]  # 如果有多个源，可以在这里添加
 allow_origin_regex = None
 
-# # Add staging-specific origins
+# 添加本地开发环境源
 if config.ENV_MODE == EnvMode.LOCAL:
     allowed_origins.append("http://localhost:3000")
 
-# # Add staging-specific origins
-# if config.ENV_MODE == EnvMode.STAGING:
-#     allowed_origins.append("https://staging.suna.so")
-#     allowed_origins.append("http://localhost:3000")
-#     allow_origin_regex = r"https://suna-.*-prjcts\.vercel\.app"
-
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=allowed_origins,
-    allow_origin_regex=allow_origin_regex,
-    allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers=["Content-Type", "Authorization", "X-Project-Id", "X-MCP-URL", "X-MCP-Type", "X-MCP-Headers", "X-Refresh-Token", "X-API-Key"],
+    allow_origins=["*"],  # 临时允许所有源，用于调试
+    allow_credentials=False,  # 当使用 "*" 时必须设为 False
+    allow_methods=["*"],  # 允许所有方法
+    allow_headers=["*"],  # 允许所有头部
 )
 
-# Create a main API router
+# 创建主API路由
 api_router = APIRouter()
 
-# Include authentication router
+# 包含认证路由
 from auth.api import router as auth_router
 api_router.include_router(auth_router)
 
 # Include feature flags router
 api_router.include_router(feature_flags_api.router)
-# # Include all API routers without individual prefixes
-# api_router.include_router(agent_api.router)
+
+# Include all API routers without individual prefixes
+api_router.include_router(agent_api.router)  
 # api_router.include_router(sandbox_api.router)
 # api_router.include_router(billing_api.router)
 
@@ -215,25 +202,51 @@ async def health_check():
         # "instance_id": instance_id
     }
 
-# @api_router.get("/health-docker")
-# async def health_check():
-#     logger.info("Health docker check endpoint called")
-#     try:
-#         client = await redis.get_client()
-#         await client.ping()
-#         db = DBConnection()
-#         await db.initialize()
-#         db_client = await db.client
-#         await db_client.table("threads").select("thread_id").limit(1).execute()
-#         logger.info("Health docker check complete")
-#         return {
-#             "status": "ok", 
-#             "timestamp": datetime.now(timezone.utc).isoformat(),
-#             "instance_id": instance_id
-#         }
-#     except Exception as e:
-#         logger.error(f"Failed health docker check: {e}")
-#         raise HTTPException(status_code=500, detail="Health check failed")
+# 添加全局 OPTIONS 处理器来解决 CORS 问题
+@app.options("/{path:path}")
+async def options_handler(request: Request, path: str):
+    """处理所有的 OPTIONS 请求（CORS 预检）"""
+    logger.info(f"🔍 [CORS] OPTIONS /{path} called")
+    logger.info(f"🔍 [CORS] Headers: {dict(request.headers)}")
+    
+    from fastapi.responses import Response
+    response = Response(status_code=200)
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS, PATCH"
+    response.headers["Access-Control-Allow-Headers"] = "*"
+    response.headers["Access-Control-Max-Age"] = "86400"
+    
+    logger.info(f"✅ [CORS] Returning CORS preflight response for /{path}")
+    return response
+
+@api_router.get("/health-docker")
+async def health_check_docker():
+    """Docker健康检查端点，测试数据库和Redis连接"""
+    logger.info("Docker健康检查端点被调用")
+    try:
+        # 测试Redis连接
+        from services import redis
+        client = await redis.get_client()
+        await client.ping()
+        
+        # 测试数据库连接
+        db_instance = DBConnection()
+        await db_instance.initialize()
+        db_client = await db_instance.client
+        # 尝试查询一个简单的表来测试连接
+        await db_client.table("auth_users").select("id").limit(1).execute()
+        
+        logger.info("Docker健康检查完成")
+        return {
+            "status": "ok", 
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "instance_id": instance_id,
+            "database": "connected",
+            "redis": "connected"
+        }
+    except Exception as e:
+        logger.error(f"Docker健康检查失败: {e}")
+        raise HTTPException(status_code=500, detail=f"健康检查失败: {str(e)}")
 
 
 app.include_router(api_router, prefix="/api")

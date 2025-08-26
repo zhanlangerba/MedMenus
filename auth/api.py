@@ -1,9 +1,9 @@
 """
-用户认证API
+用户认证模块
 """
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Form
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi import APIRouter, Depends, HTTPException, Request, Form  # type: ignore
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials  # type: ignore
 from typing import Optional
 from utils.auth_utils import AuthUtils
 from utils.logger import logger
@@ -50,7 +50,7 @@ async def register(request: Request):
         confirmPassword = auth_data['confirmPassword']
         origin = auth_data['origin']
         
-        print(f"Extracted auth data: {auth_data}")
+        logger.info(f"Registration auth data: {auth_data}")
         
         # 验证必需字段
         if not email:
@@ -86,7 +86,7 @@ async def register(request: Request):
 async def login(request: Request):
     """用户登录"""
     try:
-        # 使用通用解析工具
+        # 解析前端表单数据（登录的用户名和密码）
         parsed_data = await parse_request_data(request)
         auth_data = extract_auth_data(parsed_data)
         
@@ -94,7 +94,7 @@ async def login(request: Request):
         password = auth_data['password']
         origin = auth_data['origin']
         
-        print(f"Login auth data: {auth_data}")
+        logger.info(f"Login auth data: {auth_data}")
         
         # 验证必需字段
         if not email:

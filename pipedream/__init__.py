@@ -1,5 +1,5 @@
 from utils.logger import logger
-from services.supabase import DBConnection
+from services.postgresql import DBConnection
 
 from .profile_service import ProfileService, Profile
 from .connection_service import ConnectionService, Connection, AuthType

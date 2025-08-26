@@ -24,7 +24,7 @@ COMMENT ON COLUMN agents.metadata IS 'Stores additional agent metadata including
 - installation_date: timestamp - When this agent was installed
 - last_central_update: timestamp - Last time centrally managed updates were applied';
 
-CREATE OR REPLACE FUNCTION is_suna_default_agent(agent_row agents)
+CREATE OR REPLACE FUNCTION is_fufanmanus_default_agent(agent_row agents)
 RETURNS boolean
 LANGUAGE plpgsql
 IMMUTABLE
@@ -54,7 +54,7 @@ BEGIN
 END;
 $$;
 
-GRANT EXECUTE ON FUNCTION is_suna_default_agent(agents) TO authenticated, service_role;
+GRANT EXECUTE ON FUNCTION is_fufanmanus_default_agent(agents) TO authenticated, service_role;
 GRANT EXECUTE ON FUNCTION is_centrally_managed_agent(agents) TO authenticated, service_role;
 GRANT EXECUTE ON FUNCTION get_agent_restrictions(agents) TO authenticated, service_role;
 

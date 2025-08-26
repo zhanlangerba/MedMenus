@@ -8,7 +8,7 @@ import sys
 import os
 
 # 添加项目路径
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 async def test_flags_system():
     """测试功能标志系统"""

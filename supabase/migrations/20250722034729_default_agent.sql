@@ -1,7 +1,7 @@
 BEGIN;
 
 -- Create RPC function to find Suna default agent for an account
-CREATE OR REPLACE FUNCTION find_suna_default_agent_for_account(p_account_id UUID)
+CREATE OR REPLACE FUNCTION find_fufanmanus_default_agent_for_account(p_account_id UUID)
 RETURNS TABLE (
     agent_id UUID,
     account_id UUID,
@@ -61,7 +61,7 @@ END;
 $$;
 
 -- Create function to get all Suna default agents
-CREATE OR REPLACE FUNCTION get_all_suna_default_agents()
+CREATE OR REPLACE FUNCTION get_all_fufanmanus_default_agents()
 RETURNS TABLE (
     agent_id UUID,
     account_id UUID,
@@ -129,7 +129,7 @@ END;
 $$;
 
 -- Create function to get Suna default agent statistics
-CREATE OR REPLACE FUNCTION get_suna_default_agent_stats()
+CREATE OR REPLACE FUNCTION get_fufanmanus_default_agent_stats()
 RETURNS TABLE (
     total_agents INTEGER,
     active_agents INTEGER,
@@ -232,10 +232,10 @@ END;
 $$;
 
 -- Grant permissions to the functions
-GRANT EXECUTE ON FUNCTION find_suna_default_agent_for_account(UUID) TO authenticated, service_role;
-GRANT EXECUTE ON FUNCTION get_all_suna_default_agents() TO authenticated, service_role;
+GRANT EXECUTE ON FUNCTION find_fufanmanus_default_agent_for_account(UUID) TO authenticated, service_role;
+GRANT EXECUTE ON FUNCTION get_all_fufanmanus_default_agents() TO authenticated, service_role;
 GRANT EXECUTE ON FUNCTION count_suna_agents_by_version(TEXT) TO authenticated, service_role;
-GRANT EXECUTE ON FUNCTION get_suna_default_agent_stats() TO authenticated, service_role;
+GRANT EXECUTE ON FUNCTION get_fufanmanus_default_agent_stats() TO authenticated, service_role;
 GRANT EXECUTE ON FUNCTION find_suna_agents_needing_update(TEXT) TO authenticated, service_role;
 
 COMMIT; 

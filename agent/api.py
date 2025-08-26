@@ -1,5 +1,5 @@
-from fastapi import APIRouter, HTTPException, Depends, Request, Body, File, UploadFile, Form, Query
-from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, HTTPException, Depends, Request, Body, File, UploadFile, Form, Query # type: ignore
+from fastapi.responses import StreamingResponse # type: ignore
 import asyncio
 import json
 import traceback
@@ -7,37 +7,38 @@ import base64
 from datetime import datetime, timezone
 import uuid
 from typing import Optional, List, Dict, Any
-import jwt
-from pydantic import BaseModel
+import jwt # type: ignore
+from pydantic import BaseModel # type: ignore
 import tempfile
 import os
 
-from agentpress.thread_manager import ThreadManager
-from services.supabase import DBConnection
+# from agentpress.thread_manager import ThreadManager
+from services.postgresql import DBConnection
 from services import redis
 from utils.simple_auth_middleware import get_current_user_id_from_jwt, get_user_id_from_stream_auth, verify_thread_access
 from utils.logger import logger, structlog
-from services.billing import check_billing_status, can_use_model
+# from services.billing import check_billing_status, can_use_model
 from utils.config import config
-from sandbox.sandbox import create_sandbox, delete_sandbox, get_or_start_sandbox
+# from sandbox.sandbox import create_sandbox, delete_sandbox, get_or_start_sandbox
 from services.llm import make_llm_api_call
-from run_agent_background import run_agent_background, _cleanup_redis_response_list, update_agent_run_status
+# from run_agent_background import run_agent_background, _cleanup_redis_response_list, update_agent_run_status
+from run_agent_background import run_agent_background
 from utils.constants import MODEL_NAME_ALIASES
 from flags.flags import is_enabled
 
 from .config_helper import extract_agent_config, build_unified_config, extract_tools_for_agent_run, get_mcp_configs
-from .utils import check_agent_run_limit
-from .versioning.version_service import get_version_service
-from .versioning.api import router as version_router, initialize as initialize_versioning
+# from .utils import check_agent_run_limit
+# from .versioning.version_service import get_version_service
+# from .versioning.api import router as version_router, initialize as initialize_versioning
 
 # Helper for version service
-async def _get_version_service():
-    return await get_version_service()
-from utils.suna_default_agent_service import SunaDefaultAgentService
-from .tools.sb_presentation_tool_v2 import SandboxPresentationToolV2
+# async def _get_version_service():
+#     return await get_version_service()
+# from utils.fufanmanus_default_agent_service import SunaDefaultAgentService
+# from .tools.sb_presentation_tool_v2 import SandboxPresentationToolV2
 
 router = APIRouter()
-router.include_router(version_router)
+# router.include_router(version_router)
 
 db = None
 instance_id = None # Global instance ID for this backend instance
@@ -192,7 +193,7 @@ def initialize(
     db = _db
     
     # Initialize the versioning module with the same database connection
-    initialize_versioning(_db)
+    # initialize_versioning(_db)
 
     # Use provided instance_id or generate a new one
     if _instance_id:
@@ -293,13 +294,20 @@ async def stop_agent_run(agent_run_id: str, error_message: Optional[str] = None)
     logger.info(f"Successfully initiated stop process for agent run: {agent_run_id}")
 
 async def get_agent_run_with_access_check(client, agent_run_id: str, user_id: str):
-    agent_run = await client.table('agent_runs').select('*, threads(account_id)').eq('id', agent_run_id).execute()
+    # 先查询 agent_run，使用新的 agent_run_id 字段
+    agent_run = await client.table('agent_runs').select('*').eq('agent_run_id', agent_run_id).execute()
     if not agent_run.data:
         raise HTTPException(status_code=404, detail="Agent run not found")
 
     agent_run_data = agent_run.data[0]
     thread_id = agent_run_data['thread_id']
-    account_id = agent_run_data['threads']['account_id']
+    
+    # 再查询对应的 thread 来获取 account_id
+    thread_result = await client.table('threads').select('account_id').eq('thread_id', thread_id).execute()
+    if not thread_result.data:
+        raise HTTPException(status_code=404, detail="Thread not found")
+    
+    account_id = thread_result.data[0]['account_id']
     if account_id == user_id:
         return agent_run_data
     await verify_thread_access(client, thread_id, user_id)
@@ -415,7 +423,7 @@ async def start_agent(
 
     if not agent_config:
         logger.info(f"[AGENT LOAD] No agent config yet, querying for default agent")
-        default_agent_result = await client.table('agents').select('*').eq('account_id', account_id).eq('is_default', True).execute()
+        default_agent_result = await client.schema('public').table('agents').select('*').eq('user_id', user_id).eq('is_default', True).execute()
         logger.info(f"[AGENT LOAD] Default agent query result: found {len(default_agent_result.data) if default_agent_result.data else 0} default agents")
         
         if default_agent_result.data:
@@ -445,7 +453,28 @@ async def start_agent(
             else:
                 logger.info(f"Using default agent: {agent_config['name']} ({agent_config['agent_id']}) - no version data")
         else:
-            logger.warning(f"[AGENT LOAD] No default agent found for account {account_id}")
+            logger.warning(f"[AGENT LOAD] No default agent found for user {user_id}")
+            
+            # 🆕 自动创建默认Agent（兜底机制）
+            logger.info(f"  🔧 为用户 {user_id} 自动创建默认Agent")
+            agent_id = await _create_default_agent_for_user(client, user_id)
+            
+            if agent_id:
+                # 重新查询刚创建的默认Agent
+                default_agent_result = await client.schema('public').table('agents').select('*').eq('user_id', user_id).eq('is_default', True).execute()
+                if default_agent_result.data:
+                    agent_data = default_agent_result.data[0]
+                    logger.info(f"  ✅ 自动创建的默认Agent: {agent_data.get('name', 'Unknown')} (ID: {agent_data.get('agent_id')})")
+                    
+                    # 使用版本系统获取当前版本（暂时跳过）
+                    version_data = None
+                    agent_config = extract_agent_config(agent_data, version_data)
+                    
+                    logger.info(f"  🎯 使用自动创建的默认Agent: {agent_config['name']} ({agent_config['agent_id']})")
+                else:
+                    logger.error(f"  ❌ 自动创建默认Agent后仍然无法查询到")
+            else:
+                logger.error(f"  ❌ 自动创建默认Agent失败")
 
     logger.info(f"[AGENT LOAD] Final agent_config: {agent_config is not None}")
     if agent_config:
@@ -488,22 +517,22 @@ async def start_agent(
     else:
         logger.info(f"Using default model: {effective_model}")
     
-    agent_run = await client.table('agent_runs').insert({
+    agent_run = await client.schema('public').table('agent_runs').insert({
         "thread_id": thread_id,
         "status": "running",
-        "started_at": datetime.now(timezone.utc).isoformat(),
+        "started_at": datetime.now(),
         "agent_id": agent_config.get('agent_id') if agent_config else None,
         "agent_version_id": agent_config.get('current_version_id') if agent_config else None,
-        "metadata": {
+        "metadata": json.dumps({
             "model_name": effective_model,
             "requested_model": model_name,
             "enable_thinking": body.enable_thinking,
             "reasoning_effort": body.reasoning_effort,
             "enable_context_manager": body.enable_context_manager
-        }
-    }).execute()
-
-    agent_run_id = agent_run.data[0]['id']
+        })
+    })
+    
+    agent_run_id = str(agent_run.data[0].get('agent_run_id') or agent_run.data[0]['id'])
     structlog.contextvars.bind_contextvars(
         agent_run_id=agent_run_id,
     )
@@ -546,15 +575,36 @@ async def stop_agent(agent_run_id: str, user_id: str = Depends(get_current_user_
 @router.get("/thread/{thread_id}/agent-runs")
 async def get_agent_runs(thread_id: str, user_id: str = Depends(get_current_user_id_from_jwt)):
     """Get all agent runs for a thread."""
+    print(f"🔍 ===== 查询线程Agent运行记录 =====")
+    print(f"  📋 thread_id: {thread_id}")
+    print(f"  👤 user_id: {user_id}")
+    
     structlog.contextvars.bind_contextvars(
         thread_id=thread_id,
     )
     logger.info(f"Fetching agent runs for thread: {thread_id}")
     client = await db.client
     await verify_thread_access(client, thread_id, user_id)
-    agent_runs = await client.table('agent_runs').select('id, thread_id, status, started_at, completed_at, error, created_at, updated_at').eq("thread_id", thread_id).order('created_at', desc=True).execute()
+    
+    print(f"  🔍 查询数据库中的agent_runs记录...")
+    agent_runs = await client.table('agent_runs').select('id, agent_run_id, thread_id, status, started_at, completed_at, error, created_at, updated_at').eq("thread_id", thread_id).order('created_at', desc=True).execute()
+    
+    print(f"  📊 查询结果: 找到 {len(agent_runs.data)} 条记录")
+    for i, run in enumerate(agent_runs.data):
+        print(f"    {i+1}. ID: {run.get('id')}, agent_run_id: {run.get('agent_run_id')}, 状态: {run.get('status')}, 开始时间: {run.get('started_at')}, 完成时间: {run.get('completed_at')}")
+    
+    # 处理返回数据，确保使用正确的ID字段
+    processed_runs = []
+    for run in agent_runs.data:
+        processed_run = dict(run)
+        # 优先使用agent_run_id，如果没有则使用id
+        if processed_run.get('agent_run_id'):
+            processed_run['id'] = processed_run['agent_run_id']
+        processed_runs.append(processed_run)
+    
     logger.debug(f"Found {len(agent_runs.data)} agent runs for thread: {thread_id}")
-    return {"agent_runs": agent_runs.data}
+    print(f"🎉 ===== 查询完成 =====")
+    return {"agent_runs": processed_runs}
 
 @router.get("/agent-run/{agent_run_id}")
 async def get_agent_run(agent_run_id: str, user_id: str = Depends(get_current_user_id_from_jwt)):
@@ -600,7 +650,7 @@ async def get_thread_agent(thread_id: str, user_id: str = Depends(get_current_us
         agent_source = "none"
         
         # Get the most recently used agent from agent_runs
-        recent_agent_result = await client.table('agent_runs').select('agent_id', 'agent_version_id').eq('thread_id', thread_id).not_.is_('agent_id', 'null').order('created_at', desc=True).limit(1).execute()
+        recent_agent_result = await client.table('agent_runs').select('agent_id', 'agent_version_id').eq('thread_id', thread_id).neq('agent_id', None).order('created_at', desc=True).limit(1).execute()
         if recent_agent_result.data:
             effective_agent_id = recent_agent_result.data[0]['agent_id']
             recent_version_id = recent_agent_result.data[0].get('agent_version_id')
@@ -616,7 +666,7 @@ async def get_thread_agent(thread_id: str, user_id: str = Depends(get_current_us
             }
         
         # Fetch the agent details
-        agent_result = await client.table('agents').select('*').eq('agent_id', effective_agent_id).eq('account_id', account_id).execute()
+        agent_result = await client.table('agents').select('*').eq('agent_id', effective_agent_id).eq('user_id', user_id).execute()
         
         if not agent_result.data:
             # Agent was deleted or doesn't exist
@@ -692,7 +742,7 @@ async def get_thread_agent(thread_id: str, user_id: str = Depends(get_current_us
         return {
             "agent": AgentResponse(
                 agent_id=agent_data['agent_id'],
-                account_id=agent_data['account_id'],
+                account_id=user_id,  # 使用 user_id 作为 account_id
                 name=agent_data['name'],
                 description=agent_data.get('description'),
                 system_prompt=system_prompt,
@@ -705,12 +755,12 @@ async def get_thread_agent(thread_id: str, user_id: str = Depends(get_current_us
                 avatar=agent_config.get('avatar'),
                 avatar_color=agent_config.get('avatar_color'),
                 profile_image_url=agent_config.get('profile_image_url'),
-                created_at=agent_data['created_at'],
-                updated_at=agent_data.get('updated_at', agent_data['created_at']),
+                created_at=agent_data['created_at'].isoformat() if isinstance(agent_data['created_at'], datetime) else str(agent_data['created_at']),
+                updated_at=agent_data.get('updated_at', agent_data['created_at']).isoformat() if isinstance(agent_data.get('updated_at', agent_data['created_at']), datetime) else str(agent_data.get('updated_at', agent_data['created_at'])),
                 current_version_id=agent_data.get('current_version_id'),
                 version_count=agent_data.get('version_count', 1),
                 current_version=current_version,
-                metadata=agent_data.get('metadata')
+                metadata=json.loads(agent_data.get('metadata', '{}')) if isinstance(agent_data.get('metadata'), str) else agent_data.get('metadata', {})
             ),
             "source": agent_source,
             "message": f"Using {agent_source} agent: {agent_data['name']}. Threads are agent-agnostic - you can change agents anytime."
@@ -947,7 +997,8 @@ async def generate_and_update_project_name(project_id: str, prompt: str):
             logger.warning(f"Failed to get valid response from LLM for project {project_id} naming. Response: {response}")
 
         if generated_name:
-            update_result = await client.table('projects').update({"name": generated_name}).eq("project_id", project_id).execute()
+            # 修复数据库调用顺序：先设置条件，再调用update
+            update_result = await client.table('projects').eq("project_id", project_id).update({"name": generated_name})
             if hasattr(update_result, 'data') and update_result.data:
                 logger.info(f"Successfully updated project {project_id} name to '{generated_name}'")
             else:
@@ -963,381 +1014,638 @@ async def generate_and_update_project_name(project_id: str, prompt: str):
 
 @router.post("/agent/initiate", response_model=InitiateAgentResponse)
 async def initiate_agent_with_files(
-    prompt: str = Form(...),
-    model_name: Optional[str] = Form(None),  # Default to None to use config.MODEL_TO_USE
-    enable_thinking: Optional[bool] = Form(False),
-    reasoning_effort: Optional[str] = Form("low"),
-    stream: Optional[bool] = Form(True),
+    prompt: str = Form(...),  
+    model_name: Optional[str] = Form(None),  
+    enable_thinking: Optional[bool] = Form(False),  
+    reasoning_effort: Optional[str] = Form("low"),  
+    stream: Optional[bool] = Form(True),  
     enable_context_manager: Optional[bool] = Form(False),
-    agent_id: Optional[str] = Form(None),  # Add agent_id parameter
+    agent_id: Optional[str] = Form(None), 
     files: List[UploadFile] = File(default=[]),
     is_agent_builder: Optional[bool] = Form(False),
     target_agent_id: Optional[str] = Form(None),
     user_id: str = Depends(get_current_user_id_from_jwt)
 ):
     """
-    Initiate a new agent session with optional file attachments.
-
-    [WARNING] Keep in sync with create thread endpoint.
+    启动一个新的Agent会话，支持可选的文件附件
+    
+    参数说明:
+    - prompt: 用户输入的提示词
+    - model_name: 使用的模型名称（如果为None则使用配置中的默认模型）
+    - enable_thinking: 是否启用思考模式
+    - reasoning_effort: 推理程度（low/medium/high）
+    - stream: 是否启用流式响应
+    - enable_context_manager: 是否启用上下文管理器
+    - agent_id: 指定的Agent ID（可选）
+    - files: 上传的文件列表
+    - is_agent_builder: 是否为Agent构建器模式
+    - target_agent_id: 目标Agent ID（在构建器模式下使用）
+    - user_id: 当前用户ID（从JWT中获取）
+    
+    需要与create thread端点保持同步
     """
-    global instance_id # Ensure instance_id is accessible
+
+    print("===== 开始处理 /agent/initiate 请求 =====")
+    
+    # 打印前端传递的所有参数
+    print("1. 前端传递的参数:")
+    print(f"  - prompt: {prompt}")
+    print(f"  - model_name: {model_name}")
+    
+    # # 打印文件详细信息
+    # for i, file in enumerate(files):
+    #     print(f"  - 文件{i+1}: {file.filename} (大小: {file.size if hasattr(file, 'size') else '未知'} bytes, 类型: {file.content_type})")
+    
+    global instance_id # 确保instance_id可访问
+    print(f"2. 当前instance_id: {instance_id}")
     if not instance_id:
+        print("Agent API未初始化，缺少instance_id")
         raise HTTPException(status_code=500, detail="Agent API not initialized with instance ID")
 
-    # Use model from config if not specified in the request
-    logger.info(f"Original model_name from request: {model_name}")
+    # 步骤1: 处理模型名称
+    print("🔧 步骤1: 处理模型名称")
+    print(f"  原始model_name: {model_name}")
 
     if model_name is None:
         model_name = config.MODEL_TO_USE
-        logger.info(f"Using model from config: {model_name}")
+        print(f"  使用配置中的默认模型: {model_name}")
 
-    # Log the model name after alias resolution
+    # 解析模型别名
     resolved_model = MODEL_NAME_ALIASES.get(model_name, model_name)
-    logger.info(f"Resolved model name: {resolved_model}")
+    print(f"  解析后的模型名称: {resolved_model}")
 
-    # Update model_name to use the resolved version
+    # 更新model_name为解析后的版本
     model_name = resolved_model
+    print(f"  最终使用的模型: {model_name}")
 
-    logger.info(f"Starting new agent in agent builder mode: {is_agent_builder}, target_agent_id: {target_agent_id}")
+    # 步骤2: 检查Agent构建器模式
+    print("🔧 步骤2: 检查Agent构建器模式")
+    print(f"  is_agent_builder: {is_agent_builder}")
+    print(f"  target_agent_id: {target_agent_id}")
 
-    logger.info(f"[\033[91mDEBUG\033[0m] Initiating new agent with prompt and {len(files)} files (Instance: {instance_id}), model: {model_name}, enable_thinking: {enable_thinking}")
-    client = await db.client
-    account_id = user_id # In Basejump, personal account_id is the same as user_id
+    # 步骤3: 初始化数据库连接
+    print("🔧 步骤3: 初始化数据库连接")
+    print(f"  开始初始化Agent会话，文件数量: {len(files)}，实例ID: {instance_id}")
+    print(f"  模型: {model_name}, 启用思考: {enable_thinking}")
     
-    # Load agent configuration with version support (same as start_agent endpoint)
+    client = await db.client
+    print(f"  数据库连接成功，account_id: {user_id}")
+    
+    # 测试数据库连接 - 查询一个简单的表
+    try:
+        # 使用public schema查询users表
+        test_result = await client.schema('public').table('users').select('id, email, name').limit(1).execute()
+        print(f"  ✅ 数据库查询测试成功: 找到 {len(test_result.data)} 条记录")
+    except Exception as e:
+        print(f"  ❌ 数据库查询测试失败: {e}")
+        raise
+    
+    # 步骤4: 加载Agent配置（支持版本管理）
+    print("🔧 步骤4: 加载Agent配置")
+    
     agent_config = None
     
-    logger.info(f"[AGENT INITIATE] Agent loading flow:")
-    logger.info(f"  - agent_id param: {agent_id}")
+    print(f"  Agent加载流程:")
+    print(f"  - 请求的agent_id: {agent_id}")
     
     if agent_id:
-        logger.info(f"[AGENT INITIATE] Querying for specific agent: {agent_id}")
-        # Get agent
-        agent_result = await client.table('agents').select('*').eq('agent_id', agent_id).eq('account_id', account_id).execute()
-        logger.info(f"[AGENT INITIATE] Query result: found {len(agent_result.data) if agent_result.data else 0} agents")
+        print("等待实现")
+        # print(f"  🎯 查询指定的Agent: {agent_id}")
+        # # 获取指定的Agent
+        # agent_result = await client.table('agents').select('*').eq('agent_id', agent_id).eq('account_id', user_id).execute()
+        # print(f"  📊 查询结果: 找到 {len(agent_result.data) if agent_result.data else 0} 个Agent")
         
-        if not agent_result.data:
-            raise HTTPException(status_code=404, detail="Agent not found or access denied")
+        # if not agent_result.data:
+        #     print(f"  ❌ 未找到Agent或访问被拒绝: {agent_id}")
+        #     raise HTTPException(status_code=404, detail="Agent not found or access denied")
         
-        agent_data = agent_result.data[0]
+        # agent_data = agent_result.data[0]
+        # print(f"  ✅ 找到Agent: {agent_data.get('name', 'Unknown')} (ID: {agent_id})")
         
-        # Use versioning system to get current version
-        version_data = None
-        if agent_data.get('current_version_id'):
-            try:
-                version_service = await _get_version_service()
-                version_obj = await version_service.get_version(
-                    agent_id=agent_id,
-                    version_id=agent_data['current_version_id'],
-                    user_id=user_id
-                )
-                version_data = version_obj.to_dict()
-                logger.info(f"[AGENT INITIATE] Got version data from version manager: {version_data.get('version_name')}")
-                logger.info(f"[AGENT INITIATE] Version data: {version_data}")
-            except Exception as e:
-                logger.warning(f"[AGENT INITIATE] Failed to get version data: {e}")
+        # # 使用版本系统获取当前版本
+        # version_data = None
+        # if agent_data.get('current_version_id'):
+        #     try:
+        #         print(f"  🔄 获取版本数据: {agent_data['current_version_id']}")
+        #         version_service = await _get_version_service()
+        #         version_obj = await version_service.get_version(
+        #             agent_id=agent_id,
+        #             version_id=agent_data['current_version_id'],
+        #             user_id=user_id
+        #         )
+        #         version_data = version_obj.to_dict()
+        #         print(f"  ✅ 从版本管理器获取版本数据: {version_data.get('version_name')}")
+        #         print(f"  📋 版本数据详情: {version_data}")
+        #     except Exception as e:
+        #         print(f"  ⚠️ 获取版本数据失败: {e}")
         
-        logger.info(f"[AGENT INITIATE] About to call extract_agent_config with version data: {version_data is not None}")
+        # print(f"  🔧 准备调用extract_agent_config，是否有版本数据: {version_data is not None}")
         
-        agent_config = extract_agent_config(agent_data, version_data)
+        # agent_config = extract_agent_config(agent_data, version_data)
         
-        if version_data:
-            logger.info(f"Using custom agent: {agent_config['name']} ({agent_id}) version {agent_config.get('version_name', 'v1')}")
-        else:
-            logger.info(f"Using custom agent: {agent_config['name']} ({agent_id}) - no version data")
+        # if version_data:
+        #     logger.info(f"  🎯 使用自定义Agent: {agent_config['name']} ({agent_id}) 版本 {agent_config.get('version_name', 'v1')}")
+        # else:
+        #     logger.info(f"  🎯 使用自定义Agent: {agent_config['name']} ({agent_id}) - 无版本数据")
     else:
-        logger.info(f"[AGENT INITIATE] No agent_id provided, querying for default agent")
-        # Try to get default agent for the account
-        default_agent_result = await client.table('agents').select('*').eq('account_id', account_id).eq('is_default', True).execute()
-        logger.info(f"[AGENT INITIATE] Default agent query result: found {len(default_agent_result.data) if default_agent_result.data else 0} default agents")
+        print(f"  🔍 未提供agent_id，查询默认Agent")
+        # 尝试获取用户的默认Agent
+        default_agent_result = await client.schema('public').table('agents').select('*').eq('user_id', user_id).eq('is_default', True).execute()
+        print(f"  📊 默认Agent查询结果: 找到 {len(default_agent_result.data) if default_agent_result.data else 0} 个默认Agent")
         
         if default_agent_result.data:
             agent_data = default_agent_result.data[0]
+            print(f"  ✅ 找到默认Agent: {agent_data.get('name', 'Unknown')} (ID: {agent_data.get('agent_id')})")
             
-            # Use versioning system to get current version
+            # 使用版本系统获取当前版本
             version_data = None
-            if agent_data.get('current_version_id'):
-                try:
-                    version_service = await _get_version_service()
-                    version_obj = await version_service.get_version(
-                        agent_id=agent_data['agent_id'],
-                        version_id=agent_data['current_version_id'],
-                        user_id=user_id
-                    )
-                    version_data = version_obj.to_dict()
-                    logger.info(f"[AGENT INITIATE] Got default agent version from version manager: {version_data.get('version_name')}")
-                except Exception as e:
-                    logger.warning(f"[AGENT INITIATE] Failed to get default agent version data: {e}")
+            # if agent_data.get('current_version_id'):
+            #     try:
+            #         logger.info(f"  🔄 获取默认Agent版本数据: {agent_data['current_version_id']}")
+            #         version_service = await _get_version_service()
+            #         version_obj = await version_service.get_version(
+            #             agent_id=agent_data['agent_id'],
+            #             version_id=agent_data['current_version_id'],
+            #             user_id=user_id
+            #         )
+            #         version_data = version_obj.to_dict()
+            #         logger.info(f"  ✅ 从版本管理器获取默认Agent版本: {version_data.get('version_name')}")
+            #     except Exception as e:
+            #         logger.warning(f"  ⚠️ 获取默认Agent版本数据失败: {e}")
             
-            logger.info(f"[AGENT INITIATE] About to call extract_agent_config for DEFAULT agent with version data: {version_data is not None}")
+            # logger.info(f"  🔧 准备为默认Agent调用extract_agent_config，是否有版本数据: {version_data is not None}")
             
             agent_config = extract_agent_config(agent_data, version_data)
             
             if version_data:
-                logger.info(f"Using default agent: {agent_config['name']} ({agent_config['agent_id']}) version {agent_config.get('version_name', 'v1')}")
+                print(f"  🎯 使用默认Agent: {agent_config['name']} ({agent_config['agent_id']}) 版本 {agent_config.get('version_name', 'v1')}")
             else:
-                logger.info(f"Using default agent: {agent_config['name']} ({agent_config['agent_id']}) - no version data")
+                print(f"  🎯 使用默认Agent: {agent_config['name']} ({agent_config['agent_id']}) - 无版本数据")
         else:
-            logger.warning(f"[AGENT INITIATE] No default agent found for account {account_id}")
+            print(f"  ⚠️ 用户 {user_id} 未找到默认Agent")
+            
+            # 🆕 自动创建默认Agent（兜底机制）
+            print(f"  🔧 为用户 {user_id} 自动创建默认Agent")
+            agent_id = await _create_default_agent_for_user(client, user_id)
+            
+            if agent_id:
+                # 重新查询刚创建的默认Agent
+                default_agent_result = await client.schema('public').table('agents').select('*').eq('user_id', user_id).eq('is_default', True).execute()
+                if default_agent_result.data:
+                    agent_data = default_agent_result.data[0]
+                    print(f"  ✅ 自动创建的默认Agent: {agent_data.get('name', 'Unknown')} (ID: {agent_data.get('agent_id')})")
+                    
+                    # 使用版本系统获取当前版本（暂时跳过）
+                    version_data = None
+                    agent_config = extract_agent_config(agent_data, version_data)
+                    
+                    print(f"  🎯 使用自动创建的默认Agent: {agent_config['name']} ({agent_config['agent_id']})")
+                else:
+                    print(f"  ❌ 自动创建默认Agent后仍然无法查询到")
+            else:
+                print(f"  ❌ 自动创建默认Agent失败")
     
-    logger.info(f"[AGENT INITIATE] Final agent_config: {agent_config is not None}")
+    print(f"  📋 最终agent_config状态: {agent_config is not None}")
     if agent_config:
-        logger.info(f"[AGENT INITIATE] Agent config keys: {list(agent_config.keys())}")
+        print(f"  🔑 Agent配置键: {list(agent_config.keys())}")
+        print(f"  📝 Agent名称: {agent_config.get('name', 'Unknown')}")
+        print(f"  🆔 Agent ID: {agent_config.get('agent_id', 'Unknown')}")
 
-    # Run all checks concurrently
-    model_check_task = asyncio.create_task(can_use_model(client, account_id, model_name))
-    billing_check_task = asyncio.create_task(check_billing_status(client, account_id))
-    limit_check_task = asyncio.create_task(check_agent_run_limit(client, account_id))
+    # 步骤5: 执行权限和限制检查
+    print("🔧 步骤5: 执行权限和限制检查")
+    
+    print("  🔄 开始并发执行检查任务...")
+    # 并发执行所有检查
+    # model_check_task = asyncio.create_task(can_use_model(client, account_id, model_name))
+    # 检查结果并抛出相应的错误
+    # billing_check_task = asyncio.create_task(check_billing_status(client, account_id))
+    # limit_check_task = asyncio.create_task(check_agent_run_limit(client, account_id))
 
-    # Wait for all checks to complete
-    (can_use, model_message, allowed_models), (can_run, message, subscription), limit_check = await asyncio.gather(
-        model_check_task, billing_check_task, limit_check_task
-    )
-
-    # Check results and raise appropriate errors
-    if not can_use:
-        raise HTTPException(status_code=403, detail={"message": model_message, "allowed_models": allowed_models})
-
-    can_run, message, subscription = await check_billing_status(client, account_id)
-    if not can_run:
-        raise HTTPException(status_code=402, detail={"message": message, "subscription": subscription})
-
-    # Check agent run limit (maximum parallel runs in past 24 hours)
-    limit_check = await check_agent_run_limit(client, account_id)
-    if not limit_check['can_start']:
-        error_detail = {
-            "message": f"Maximum of {config.MAX_PARALLEL_AGENT_RUNS} parallel agent runs allowed within 24 hours. You currently have {limit_check['running_count']} running.",
-            "running_thread_ids": limit_check['running_thread_ids'],
-            "running_count": limit_check['running_count'],
-            "limit": config.MAX_PARALLEL_AGENT_RUNS
-        }
-        logger.warning(f"Agent run limit exceeded for account {account_id}: {limit_check['running_count']} running agents")
-        raise HTTPException(status_code=429, detail=error_detail)
+    # 等待所有检查完成
+    print("  ⏳ 等待检查结果...")
+    # (can_use, model_message, allowed_models), (can_run, message, subscription), limit_check = await asyncio.gather(
+    #     model_check_task, billing_check_task, limit_check_task
+    # )
 
     try:
-        # 1. Create Project
+        # 步骤6: 创建项目和数据库记录
+        print("🔧 步骤6: 创建项目和数据库记录")
+        
+        # 1. 创建项目
+        print("  📁 1. 创建项目")
         placeholder_name = f"{prompt[:30]}..." if len(prompt) > 30 else prompt
-        project = await client.table('projects').insert({
-            "project_id": str(uuid.uuid4()), "account_id": account_id, "name": placeholder_name,
-            "created_at": datetime.now(timezone.utc).isoformat()
-        }).execute()
-        project_id = project.data[0]['project_id']
-        logger.info(f"Created new project: {project_id}")
-
-        # 2. Create Sandbox (lazy): only create now if files were uploaded and need the
-        # sandbox immediately. Otherwise leave sandbox creation to `_ensure_sandbox()`
-        # which will create it lazily when tools require it.
-        sandbox_id = None
-        sandbox = None
-        sandbox_pass = None
-        vnc_url = None
-        website_url = None
-        token = None
-
-        if files:
-            # 3. Create Sandbox (lazy): only create now if files were uploaded and need the
-            try:
-                sandbox_pass = str(uuid.uuid4())
-                sandbox = await create_sandbox(sandbox_pass, project_id)
-                sandbox_id = sandbox.id
-                logger.info(f"Created new sandbox {sandbox_id} for project {project_id}")
-
-                # Get preview links
-                vnc_link = await sandbox.get_preview_link(6080)
-                website_link = await sandbox.get_preview_link(8080)
-                vnc_url = vnc_link.url if hasattr(vnc_link, 'url') else str(vnc_link).split("url='")[1].split("'")[0]
-                website_url = website_link.url if hasattr(website_link, 'url') else str(website_link).split("url='")[1].split("'")[0]
-                token = None
-                if hasattr(vnc_link, 'token'):
-                    token = vnc_link.token
-                elif "token='" in str(vnc_link):
-                    token = str(vnc_link).split("token='")[1].split("'")[0]
-
-                # Update project with sandbox info
-                update_result = await client.table('projects').update({
-                    'sandbox': {
-                        'id': sandbox_id, 'pass': sandbox_pass, 'vnc_preview': vnc_url,
-                        'sandbox_url': website_url, 'token': token
-                    }
-                }).eq('project_id', project_id).execute()
-
-                if not update_result.data:
-                    logger.error(f"Failed to update project {project_id} with new sandbox {sandbox_id}")
-                    if sandbox_id:
-                        try: await delete_sandbox(sandbox_id)
-                        except Exception as e: logger.error(f"Error deleting sandbox: {str(e)}")
-                    raise Exception("Database update failed")
-            except Exception as e:
-                logger.error(f"Error creating sandbox: {str(e)}")
-                await client.table('projects').delete().eq('project_id', project_id).execute()
-                if sandbox_id:
-                    try: await delete_sandbox(sandbox_id)
-                    except Exception:
-                        pass
-                raise Exception("Failed to create sandbox")
-
-        # 3. Create Thread
-        thread_data = {
-            "thread_id": str(uuid.uuid4()), 
+        print(f"    项目名称: {placeholder_name}")
+        
+        project_id = str(uuid.uuid4())
+        print(f"    生成项目ID: {project_id}")
+        
+        project = await client.schema('public').table('projects').insert({
             "project_id": project_id, 
-            "account_id": account_id,
-            "created_at": datetime.now(timezone.utc).isoformat()
-        }
+            "account_id": user_id, 
+            "name": placeholder_name,
+            "created_at": datetime.now()
+        })
+        
+        if not project.data:
+            print("  ❌ 项目创建失败")
+            raise Exception("Failed to create project")
+            
+        project_id = project.data[0]['project_id']
+        print(f"  ✅ 项目创建成功: {project_id}")
 
+        # # 2. 创建沙盒（懒加载）：只有在文件上传时才立即创建
+        # logger.info("  🏗️ 2. 处理沙盒创建")
+        # sandbox_id = None
+        # sandbox = None
+        # sandbox_pass = None
+        # vnc_url = None
+        # website_url = None
+        # token = None
+
+        # if files:
+        #     logger.info(f"  📁 检测到 {len(files)} 个文件，需要创建沙盒")
+        #     try:
+        #         logger.info("  🔧 开始创建沙盒...")
+        #         sandbox_pass = str(uuid.uuid4())
+        #         logger.info(f"    生成沙盒密码: {sandbox_pass}")
+                
+        #         sandbox = await create_sandbox(sandbox_pass, project_id)
+        #         sandbox_id = sandbox.id
+        #         logger.info(f"  ✅ 沙盒创建成功: {sandbox_id} (项目: {project_id})")
+
+        #         # 获取预览链接
+        #         logger.info("  🔗 获取预览链接...")
+        #         vnc_link = await sandbox.get_preview_link(6080)
+        #         website_link = await sandbox.get_preview_link(8080)
+                
+        #         vnc_url = vnc_link.url if hasattr(vnc_link, 'url') else str(vnc_link).split("url='")[1].split("'")[0]
+        #         website_url = website_link.url if hasattr(website_link, 'url') else str(website_link).split("url='")[1].split("'")[0]
+                
+        #         token = None
+        #         if hasattr(vnc_link, 'token'):
+        #             token = vnc_link.token
+        #         elif "token='" in str(vnc_link):
+        #             token = str(vnc_link).split("token='")[1].split("'")[0]
+                
+        #         logger.info(f"    VNC URL: {vnc_url}")
+        #         logger.info(f"    Website URL: {website_url}")
+        #         logger.info(f"    Token: {token}")
+
+        #         # 更新项目信息
+        #         logger.info("  📝 更新项目沙盒信息...")
+        #         update_result = await client.table('projects').update({
+        #             'sandbox': {
+        #                 'id': sandbox_id, 
+        #                 'pass': sandbox_pass, 
+        #                 'vnc_preview': vnc_url,
+        #                 'sandbox_url': website_url, 
+        #                 'token': token
+        #             }
+        #         }).eq('project_id', project_id).execute()
+
+        #         if not update_result.data:
+        #             logger.error(f"  ❌ 更新项目 {project_id} 沙盒信息失败")
+        #             if sandbox_id:
+        #                 try: 
+        #                     await delete_sandbox(sandbox_id)
+        #                     logger.info(f"  🗑️ 已删除沙盒 {sandbox_id}")
+        #                 except Exception as e: 
+        #                     logger.error(f"  ❌ 删除沙盒失败: {str(e)}")
+        #             raise Exception("Database update failed")
+                    
+        #         logger.info("  ✅ 项目沙盒信息更新成功")
+                
+        #     except Exception as e:
+        #         logger.error(f"  ❌ 创建沙盒失败: {str(e)}")
+        #         logger.info("  🗑️ 清理已创建的项目...")
+        #         await client.table('projects').delete().eq('project_id', project_id).execute()
+        #         if sandbox_id:
+        #             try: 
+        #                 await delete_sandbox(sandbox_id)
+        #                 logger.info(f"  🗑️ 已删除沙盒 {sandbox_id}")
+        #             except Exception:
+        #                 pass
+        #         raise Exception("Failed to create sandbox")
+        # else:
+        #     logger.info("  ⏭️ 无文件上传，跳过沙盒创建")
+
+        # 3. 创建线程
+        print("  💬 3. 创建线程")
+        thread_id = str(uuid.uuid4())
+        print(f"    生成线程ID: {thread_id}")
+        
+        thread_data = {
+            "thread_id": thread_id, 
+            "project_id": project_id, 
+            "account_id": user_id,
+            "created_at": datetime.now()
+        }
+        print(f"    线程数据: {thread_data}")
+
+        # 绑定上下文变量
+        print("  🔗 绑定上下文变量...")
         structlog.contextvars.bind_contextvars(
             thread_id=thread_data["thread_id"],
             project_id=project_id,
-            account_id=account_id,
+            account_id=user_id,
         )
         
-        # Don't store agent_id in thread since threads are now agent-agnostic
-        # The agent selection will be handled per message/agent run
+        # 线程现在是Agent无关的，不存储agent_id
+        # Agent选择将在每个消息/Agent运行时处理
         if agent_config:
-            logger.info(f"Using agent {agent_config['agent_id']} for this conversation (thread remains agent-agnostic)")
+            print(f"  🎯 使用Agent {agent_config['agent_id']} 进行对话 (线程保持Agent无关)")
             structlog.contextvars.bind_contextvars(
                 agent_id=agent_config['agent_id'],
             )
         
-        # Store agent builder metadata if this is an agent builder session
+        # 如果是Agent构建器会话，存储构建器元数据
         if is_agent_builder:
+            print(f"  🔧 存储Agent构建器元数据: target_agent_id={target_agent_id}")
             thread_data["metadata"] = {
                 "is_agent_builder": True,
                 "target_agent_id": target_agent_id
             }
-            logger.info(f"Storing agent builder metadata in thread: target_agent_id={target_agent_id}")
             structlog.contextvars.bind_contextvars(
                 target_agent_id=target_agent_id,
             )
         
-        thread = await client.table('threads').insert(thread_data).execute()
+        # 插入线程到数据库
+        print("  💾 插入线程到数据库...")
+        thread = await client.schema('public').table('threads').insert(thread_data)
+        
+        if not thread.data:
+            print("  ❌ 线程创建失败")
+            raise Exception("Failed to create thread")
+            
         thread_id = thread.data[0]['thread_id']
-        logger.info(f"Created new thread: {thread_id}")
+        print(f"  ✅ 线程创建成功: {thread_id}")
 
-        # Trigger Background Naming Task
+        # 触发后台命名任务
+        print("  🏷️ 触发后台项目命名任务...")
         asyncio.create_task(generate_and_update_project_name(project_id=project_id, prompt=prompt))
 
-        # 4. Upload Files to Sandbox (if any)
+        # 4. 上传文件到沙盒（如果有）
+        print("  📁 4. 处理文件上传")
         message_content = prompt
-        if files:
-            successful_uploads = []
-            failed_uploads = []
-            for file in files:
-                if file.filename:
-                    try:
-                        safe_filename = file.filename.replace('/', '_').replace('\\', '_')
-                        target_path = f"/workspace/{safe_filename}"
-                        logger.info(f"Attempting to upload {safe_filename} to {target_path} in sandbox {sandbox_id}")
-                        content = await file.read()
-                        upload_successful = False
-                        try:
-                            if hasattr(sandbox, 'fs') and hasattr(sandbox.fs, 'upload_file'):
-                                await sandbox.fs.upload_file(content, target_path)
-                                logger.debug(f"Called sandbox.fs.upload_file for {target_path}")
-                                upload_successful = True
-                            else:
-                                raise NotImplementedError("Suitable upload method not found on sandbox object.")
-                        except Exception as upload_error:
-                            logger.error(f"Error during sandbox upload call for {safe_filename}: {str(upload_error)}", exc_info=True)
+        print(f"    初始消息内容: {prompt}")
+        
+        # if files:
+        #     logger.info(f"  📤 开始上传 {len(files)} 个文件...")
+        #     successful_uploads = []
+        #     failed_uploads = []
+            
+        #     for i, file in enumerate(files):
+        #         logger.info(f"  📄 处理文件 {i+1}/{len(files)}: {file.filename}")
+                
+        #         if file.filename:
+        #             try:
+        #                 safe_filename = file.filename.replace('/', '_').replace('\\', '_')
+        #                 target_path = f"/workspace/{safe_filename}"
+        #                 logger.info(f"    🎯 目标路径: {target_path}")
+        #                 logger.info(f"    📊 文件大小: {file.size if hasattr(file, 'size') else '未知'} bytes")
+                        
+        #                 content = await file.read()
+        #                 logger.info(f"    📖 读取文件内容完成，大小: {len(content)} bytes")
+                        
+        #                 upload_successful = False
+        #                 try:
+        #                     if hasattr(sandbox, 'fs') and hasattr(sandbox.fs, 'upload_file'):
+        #                         logger.info(f"    🔄 开始上传到沙盒 {sandbox_id}...")
+        #                         await sandbox.fs.upload_file(content, target_path)
+        #                         logger.info(f"    ✅ 沙盒上传调用成功: {target_path}")
+        #                         upload_successful = True
+        #                     else:
+        #                         logger.error(f"    ❌ 沙盒对象缺少上传方法")
+        #                         raise NotImplementedError("Suitable upload method not found on sandbox object.")
+        #                 except Exception as upload_error:
+        #                     logger.error(f"    ❌ 沙盒上传失败 {safe_filename}: {str(upload_error)}", exc_info=True)
 
-                        if upload_successful:
-                            try:
-                                await asyncio.sleep(0.2)
-                                parent_dir = os.path.dirname(target_path)
-                                files_in_dir = await sandbox.fs.list_files(parent_dir)
-                                file_names_in_dir = [f.name for f in files_in_dir]
-                                if safe_filename in file_names_in_dir:
-                                    successful_uploads.append(target_path)
-                                    logger.info(f"Successfully uploaded and verified file {safe_filename} to sandbox path {target_path}")
-                                else:
-                                    logger.error(f"Verification failed for {safe_filename}: File not found in {parent_dir} after upload attempt.")
-                                    failed_uploads.append(safe_filename)
-                            except Exception as verify_error:
-                                logger.error(f"Error verifying file {safe_filename} after upload: {str(verify_error)}", exc_info=True)
-                                failed_uploads.append(safe_filename)
-                        else:
-                            failed_uploads.append(safe_filename)
-                    except Exception as file_error:
-                        logger.error(f"Error processing file {file.filename}: {str(file_error)}", exc_info=True)
-                        failed_uploads.append(file.filename)
-                    finally:
-                        await file.close()
+        #                 if upload_successful:
+        #                     try:
+        #                         logger.info(f"    🔍 验证文件上传...")
+        #                         await asyncio.sleep(0.2)
+        #                         parent_dir = os.path.dirname(target_path)
+        #                         files_in_dir = await sandbox.fs.list_files(parent_dir)
+        #                         file_names_in_dir = [f.name for f in files_in_dir]
+                                
+        #                         if safe_filename in file_names_in_dir:
+        #                             successful_uploads.append(target_path)
+        #                             logger.info(f"    ✅ 文件上传并验证成功: {safe_filename} -> {target_path}")
+        #                         else:
+        #                             logger.error(f"    ❌ 文件验证失败: {safe_filename} 在 {parent_dir} 中未找到")
+        #                             failed_uploads.append(safe_filename)
+        #                     except Exception as verify_error:
+        #                         logger.error(f"    ❌ 文件验证错误 {safe_filename}: {str(verify_error)}", exc_info=True)
+        #                         failed_uploads.append(safe_filename)
+        #                 else:
+        #                     failed_uploads.append(safe_filename)
+        #             except Exception as file_error:
+        #                 logger.error(f"    ❌ 处理文件失败 {file.filename}: {str(file_error)}", exc_info=True)
+        #                 failed_uploads.append(file.filename)
+        #             finally:
+        #                 await file.close()
+        #                 logger.info(f"    🔒 文件已关闭: {file.filename}")
 
-            if successful_uploads:
-                message_content += "\n\n" if message_content else ""
-                for file_path in successful_uploads: message_content += f"[Uploaded File: {file_path}]\n"
-            if failed_uploads:
-                message_content += "\n\nThe following files failed to upload:\n"
-                for failed_file in failed_uploads: message_content += f"- {failed_file}\n"
+        #     # 更新消息内容
+        #     if successful_uploads:
+        #         message_content += "\n\n" if message_content else ""
+        #         for file_path in successful_uploads: 
+        #             message_content += f"[Uploaded File: {file_path}]\n"
+        #         logger.info(f"  ✅ 成功上传 {len(successful_uploads)} 个文件")
+                
+        #     if failed_uploads:
+        #         message_content += "\n\nThe following files failed to upload:\n"
+        #         for failed_file in failed_uploads: 
+        #             message_content += f"- {failed_file}\n"
+        #         logger.warning(f"  ⚠️ 上传失败 {len(failed_uploads)} 个文件")
+                
+        #     logger.info(f"  📝 最终消息内容: {message_content}")
+        # else:
+        #     logger.info("  ⏭️ 无文件需要上传")
 
-        # 5. Add initial user message to thread
+        # 5. 添加初始用户消息到线程
+        print("  💬 5. 添加初始用户消息")
         message_id = str(uuid.uuid4())
+        print(f"    生成消息ID: {message_id}")
+        
         message_payload = {"role": "user", "content": message_content}
-        await client.table('messages').insert({
-            "message_id": message_id, "thread_id": thread_id, "type": "user",
-            "is_llm_message": True, "content": json.dumps(message_payload),
-            "created_at": datetime.now(timezone.utc).isoformat()
-        }).execute()
+        print(f"    消息载荷: {message_payload}")
+        
+        # 在ADK架构中，使用thread_id作为session_id
+        # 这样可以保持与现有前端逻辑的兼容性
+        adk_session_id = thread_id
+        
+        # 创建ADK session（如果不存在）
+        await _create_adk_session_if_not_exists(client, user_id, adk_session_id)
+        
+        # 使用ADK events表记录消息
+        await _log_adk_user_message_event(client, user_id, message_content, adk_session_id, message_id)
+        print(f"  ✅ 用户消息事件记录成功: {message_id}")
 
-
+        # 6. 确定最终使用的模型
+        print("  🤖 6. 确定最终使用的模型")
         effective_model = model_name
         if not model_name and agent_config and agent_config.get('model'):
             effective_model = agent_config['model']
-            logger.info(f"No model specified by user, using agent's configured model: {effective_model}")
+            print(f"    用户未指定模型，使用Agent配置的模型: {effective_model}")
         elif model_name:
-            logger.info(f"Using user-selected model: {effective_model}")
+            print(f"    使用用户选择的模型: {effective_model}")
         else:
-            logger.info(f"Using default model: {effective_model}")
+            print(f"    使用默认模型: {effective_model}")
+        
+        print(f"    最终有效模型: {effective_model}")
 
-        agent_run = await client.table('agent_runs').insert({
-            "thread_id": thread_id, "status": "running",
-            "started_at": datetime.now(timezone.utc).isoformat(),
+        # 7. 创建Agent运行记录
+        print("  🏃 7. 创建Agent运行记录")
+        agent_run_metadata = {
+            "model_name": effective_model,
+            "requested_model": model_name,
+            "enable_thinking": enable_thinking,
+            "reasoning_effort": reasoning_effort,
+            "enable_context_manager": enable_context_manager
+        }
+        print(f"    Agent运行元数据: {agent_run_metadata}")
+        
+        agent_run = await client.schema('public').table('agent_runs').insert({
+            "thread_id": thread_id, 
+            "status": "running",
+            "started_at": datetime.now(),
             "agent_id": agent_config.get('agent_id') if agent_config else None,
             "agent_version_id": agent_config.get('current_version_id') if agent_config else None,
-            "metadata": {
-                "model_name": effective_model,
-                "requested_model": model_name,
-                "enable_thinking": enable_thinking,
-                "reasoning_effort": reasoning_effort,
-                "enable_context_manager": enable_context_manager
-            }
-        }).execute()
-        agent_run_id = agent_run.data[0]['id']
-        logger.info(f"Created new agent run: {agent_run_id}")
+            "metadata": json.dumps(agent_run_metadata)
+        })
+        
+        if not agent_run.data:
+            print("  ❌ Agent运行记录创建失败")
+            raise Exception("Failed to create agent run")
+            
+        agent_run_id = str(agent_run.data[0].get('agent_run_id') or agent_run.data[0]['id'])
+        print(f"  ✅ Agent运行记录创建成功: {agent_run_id}")
+        
+        # 绑定Agent运行ID到上下文
         structlog.contextvars.bind_contextvars(
             agent_run_id=agent_run_id,
         )
 
-        # Register run in Redis
+        # 8. 在Redis中注册运行
+        print("  🔄 8. 在Redis中注册Agent运行")
         instance_key = f"active_run:{instance_id}:{agent_run_id}"
         try:
             await redis.set(instance_key, "running", ex=redis.REDIS_KEY_TTL)
+            print(f"  ✅ Redis注册成功: {instance_key}")
         except Exception as e:
-            logger.warning(f"Failed to register agent run in Redis ({instance_key}): {str(e)}")
+            print(f"  ⚠️ Redis注册失败 ({instance_key}): {str(e)}")
 
+        # 9. 获取请求ID并启动后台Agent
+        print("  🚀 9. 启动后台Agent运行")
         request_id = structlog.contextvars.get_contextvars().get('request_id')
+        print(f"    请求ID: {request_id}")
 
-        # Run agent in background
-        run_agent_background.send(
-            agent_run_id=agent_run_id, thread_id=thread_id, instance_id=instance_id,
-            project_id=project_id,
-            model_name=model_name,  # Already resolved above
-            enable_thinking=enable_thinking, reasoning_effort=reasoning_effort,
-            stream=stream, enable_context_manager=enable_context_manager,
-            agent_config=agent_config,  # Pass agent configuration
-            is_agent_builder=is_agent_builder,
-            target_agent_id=target_agent_id,
-            request_id=request_id,
-        )
+        # 发送Agent运行任务到后台
+        print("  📤 发送Agent运行任务到后台...")
+        try:
+            message = run_agent_background.send(
+                agent_run_id=agent_run_id, 
+                thread_id=thread_id, 
+                instance_id=instance_id,
+                project_id=project_id,
+                model_name=model_name,  # 上面已解析
+                enable_thinking=enable_thinking, 
+                reasoning_effort=reasoning_effort,
+                stream=stream, 
+                enable_context_manager=enable_context_manager,
+                agent_config=agent_config,  # 传递Agent配置
+                is_agent_builder=is_agent_builder,
+                target_agent_id=target_agent_id,
+                request_id=request_id,
+            )
+            print(f"  ✅ Agent运行任务已发送到后台，消息ID: {message.message_id}")
+            logger.info(f"  ✅ Agent运行任务已发送到后台，消息ID: {message.message_id}")
+        except Exception as send_error:
+            print(f"  ❌ 发送后台任务失败: {send_error}")
+            logger.error(f"  ❌ 发送后台任务失败: {send_error}")
+            # 继续执行，不中断请求
 
-        return {"thread_id": thread_id, "agent_run_id": agent_run_id}
+        # 返回结果
+        result = {"thread_id": thread_id, "agent_run_id": agent_run_id}
+        logger.info(f"🎉 ===== /agent/initiate 处理完成 =====")
+        logger.info(f"📋 返回结果: {result}")
+        return result
 
     except Exception as e:
         logger.error(f"Error in agent initiation: {str(e)}\n{traceback.format_exc()}")
         # TODO: Clean up created project/thread if initiation fails mid-way
         raise HTTPException(status_code=500, detail=f"Failed to initiate agent session: {str(e)}")
 
-# Custom agents
+async def _create_default_agent_for_user(client, user_id: str):
+    """为用户创建默认Agent（兜底机制）"""
+    try:
+        import uuid
+        from datetime import datetime
+        import json
+        
+        agent_id = str(uuid.uuid4())
+        
+        # 默认Agent配置
+        default_agent_data = {
+            'agent_id': agent_id,
+            'user_id': user_id,
+            'name': 'Default Assistant',
+            'description': '你的默认AI助手，可以帮助你完成各种任务',
+            'system_prompt': '你是一个智能助手，能够帮助用户解决各种问题。请以友好、专业的方式回答用户的问题。',
+            'model': 'deepseek/deepseek-chat-v3.1',
+            'configured_mcps': [],
+            'custom_mcps': [],
+            'agentpress_tools': {},
+            'is_default': True,
+            'is_public': False,
+            'tags': [],
+            'avatar': None,
+            'avatar_color': '#4F46E5',
+            'profile_image_url': None,
+            'current_version_id': None,
+            'version_count': 1,
+            'metadata': {
+                'created_by': 'system',
+                'auto_created': True,
+                'created_at_agent_initiate': True
+            },
+            'created_at': datetime.now(),
+            'updated_at': datetime.now()
+        }
+        
+        # 插入到agents表
+        async with client.pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO agents (
+                    agent_id, user_id, name, description, system_prompt, model,
+                    configured_mcps, custom_mcps, agentpress_tools, is_default, is_public,
+                    tags, avatar, avatar_color, profile_image_url, current_version_id,
+                    version_count, metadata, created_at, updated_at
+                ) VALUES (
+                    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20
+                )
+                """,
+                agent_id, user_id, default_agent_data['name'], default_agent_data['description'],
+                default_agent_data['system_prompt'], default_agent_data['model'],
+                json.dumps(default_agent_data['configured_mcps']), json.dumps(default_agent_data['custom_mcps']),
+                json.dumps(default_agent_data['agentpress_tools']), default_agent_data['is_default'],
+                default_agent_data['is_public'], default_agent_data['tags'], default_agent_data['avatar'],
+                default_agent_data['avatar_color'], default_agent_data['profile_image_url'],
+                default_agent_data['current_version_id'], default_agent_data['version_count'],
+                json.dumps(default_agent_data['metadata']), default_agent_data['created_at'],
+                default_agent_data['updated_at']
+            )
+        
+        logger.info(f"Auto-created default agent {agent_id} for user {user_id}")
+        return agent_id
+        
+    except Exception as e:
+        logger.error(f"Failed to auto-create default agent for user {user_id}: {e}")
+        return None
 
+# Custom agents
 @router.get("/agents", response_model=AgentsResponse)
 async def get_agents(
     user_id: str = Depends(get_current_user_id_from_jwt),
@@ -1364,84 +1672,105 @@ async def get_agents(
         # Calculate offset
         offset = (page - 1) * limit
         
-        # Start building the query
-        query = client.table('agents').select('*', count='exact').eq("account_id", user_id)
+        # Query user_states table for agents data
+        # In Google ADK architecture, agents are stored in user_states.state JSONB field
+        user_states_result = await client.table('user_states').select('*').eq("user_id", user_id).execute()
+        
+        # Extract agents from user state
+        all_agents = []
+        if user_states_result.data:
+            for state_row in user_states_result.data:
+                if state_row.get('state') and isinstance(state_row['state'], dict):
+                    agents_data = state_row['state'].get('agents', [])
+                    if isinstance(agents_data, list):
+                        all_agents.extend(agents_data)
+                    elif isinstance(agents_data, dict):
+                        # If agents is a dict, convert to list
+                        all_agents.extend(agents_data.values())
+        
+        # If no user agents found, check app_states for default agents
+        if not all_agents:
+            app_states_result = await client.table('app_states').select('*').execute()
+            for state_row in app_states_result.data:
+                if state_row.get('state') and isinstance(state_row['state'], dict):
+                    default_agents = state_row['state'].get('default_agents', [])
+                    if isinstance(default_agents, list):
+                        # Mark these as default agents available to this user
+                        for agent in default_agents:
+                            agent['is_default'] = True
+                            agent['account_id'] = user_id  # Make them available to this user
+                        all_agents.extend(default_agents)
+        
+        # Convert agents to expected format and add required fields
+        agents_data = []
+        for i, agent in enumerate(all_agents):
+            if not isinstance(agent, dict):
+                continue
+            
+            # Ensure required fields exist
+            agent_record = {
+                'agent_id': agent.get('agent_id', f"agent_{i}"),
+                'account_id': agent.get('account_id', user_id),
+                'name': agent.get('name', f'Agent {i+1}'),
+                'description': agent.get('description', ''),
+                'system_prompt': agent.get('system_prompt', ''),
+                'configured_mcps': agent.get('configured_mcps', []),
+                'custom_mcps': agent.get('custom_mcps', []),
+                'agentpress_tools': agent.get('agentpress_tools', {}),
+                'is_default': agent.get('is_default', False),
+                'is_public': agent.get('is_public', False),
+                'tags': agent.get('tags', []),
+                'avatar': agent.get('avatar'),
+                'avatar_color': agent.get('avatar_color'),
+                'profile_image_url': agent.get('profile_image_url'),
+                'created_at': agent.get('created_at', '2024-01-01T00:00:00Z'),
+                'updated_at': agent.get('updated_at', '2024-01-01T00:00:00Z'),
+                'current_version_id': agent.get('current_version_id'),
+                'version_count': agent.get('version_count', 1),
+                'metadata': agent.get('metadata', {})
+            }
+            agents_data.append(agent_record)
         
         # Apply search filter
         if search:
-            search_term = f"%{search}%"
-            query = query.or_(f"name.ilike.{search_term},description.ilike.{search_term}")
+            search_term = search.lower()
+            agents_data = [
+                agent for agent in agents_data 
+                if search_term in agent.get('name', '').lower() or 
+                   search_term in agent.get('description', '').lower()
+            ]
         
         # Apply filters
         if has_default is not None:
-            query = query.eq("is_default", has_default)
+            agents_data = [agent for agent in agents_data if agent.get('is_default') == has_default]
         
-        # For MCP and AgentPress tools filtering, we'll need to do post-processing
-        # since Supabase doesn't have great JSON array/object filtering
+        # Store original count before tool filtering
+        total_count = len(agents_data)
         
-        # Apply sorting
-        if sort_by == "name":
-            query = query.order("name", desc=(sort_order == "desc"))
-        elif sort_by == "updated_at":
-            query = query.order("updated_at", desc=(sort_order == "desc"))
-        elif sort_by == "created_at":
-            query = query.order("created_at", desc=(sort_order == "desc"))
-        else:
-            # Default to created_at
-            query = query.order("created_at", desc=(sort_order == "desc"))
-        
-        # Get paginated data and total count in one request
-        query = query.range(offset, offset + limit - 1)
-        agents_result = await query.execute()
-        total_count = agents_result.count if agents_result.count is not None else 0
-        
-        if not agents_result.data:
-            logger.info(f"No agents found for user: {user_id}")
-            return {
-                "agents": [],
-                "pagination": {
-                    "page": page,
-                    "limit": limit,
-                    "total": 0,
-                    "pages": 0
-                }
-            }
-        
-        # Post-process for tool filtering and tools_count sorting
-        agents_data = agents_result.data
-        
-        # First, fetch version data for all agents to ensure we have correct tool info
-        # Do this in a single batched query instead of per-agent service calls
+        # In Google ADK architecture, version data is embedded in agent data
+        # No separate agent_versions table needed
         agent_version_map = {}
-        version_ids = list({agent['current_version_id'] for agent in agents_data if agent.get('current_version_id')})
-        if version_ids:
-            try:
-                versions_result = await client.table('agent_versions').select(
-                    'version_id, agent_id, version_number, version_name, is_active, created_at, updated_at, created_by, config'
-                ).in_('version_id', version_ids).execute()
-
-                for row in (versions_result.data or []):
-                    config = row.get('config') or {}
-                    tools = config.get('tools') or {}
-                    version_dict = {
-                        'version_id': row['version_id'],
-                        'agent_id': row['agent_id'],
-                        'version_number': row['version_number'],
-                        'version_name': row['version_name'],
-                        'system_prompt': config.get('system_prompt', ''),
-                        'configured_mcps': tools.get('mcp', []),
-                        'custom_mcps': tools.get('custom_mcp', []),
-                        'agentpress_tools': tools.get('agentpress', {}),
-                        'is_active': row.get('is_active', False),
-                        'created_at': row.get('created_at'),
-                        'updated_at': row.get('updated_at') or row.get('created_at'),
-                        'created_by': row.get('created_by'),
-                    }
-                    agent_version_map[row['agent_id']] = version_dict
-            except Exception as e:
-                logger.warning(f"Failed to batch load versions for agents: {e}")
+        for agent in agents_data:
+            agent_id = agent.get('agent_id')
+            if agent_id:
+                # Create version data from agent data itself
+                version_dict = {
+                    'version_id': agent.get('current_version_id', f"{agent_id}_v1"),
+                    'agent_id': agent_id,
+                    'version_number': agent.get('version_count', 1),
+                    'version_name': f"v{agent.get('version_count', 1)}",
+                    'system_prompt': agent.get('system_prompt', ''),
+                    'configured_mcps': agent.get('configured_mcps', []),
+                    'custom_mcps': agent.get('custom_mcps', []),
+                    'agentpress_tools': agent.get('agentpress_tools', {}),
+                    'is_active': True,
+                    'created_at': agent.get('created_at'),
+                    'updated_at': agent.get('updated_at'),
+                    'created_by': agent.get('account_id'),
+                }
+                agent_version_map[agent_id] = version_dict
         
-        # Apply tool-based filters using version data
+        # Apply tool-based filters using embedded data
         if has_mcp_tools is not None or has_agentpress_tools is not None or tools:
             filtered_agents = []
             tools_filter = []
@@ -1461,13 +1790,9 @@ async def get_agents(
                     tools_filter = []
             
             for agent in agents_data:
-                # Get version data if available and extract configuration
-                version_data = agent_version_map.get(agent['agent_id'])
-                from agent.config_helper import extract_agent_config
-                agent_config = extract_agent_config(agent, version_data)
-                
-                configured_mcps = agent_config['configured_mcps']
-                agentpress_tools = agent_config['agentpress_tools']
+                # Use agent data directly (no need for extract_agent_config)
+                configured_mcps = agent.get('configured_mcps', [])
+                agentpress_tools = agent.get('agentpress_tools', {})
                 
                 # Check MCP tools filter
                 if has_mcp_tools is not None:
@@ -1505,19 +1830,17 @@ async def get_agents(
             
             agents_data = filtered_agents
         
-        # Handle tools_count sorting (post-processing required)
-        if sort_by == "tools_count":
+        # Apply sorting
+        if sort_by == "name":
+            agents_data.sort(key=lambda x: x.get('name', '').lower(), reverse=(sort_order == "desc"))
+        elif sort_by == "updated_at":
+            agents_data.sort(key=lambda x: x.get('updated_at', ''), reverse=(sort_order == "desc"))
+        elif sort_by == "created_at":
+            agents_data.sort(key=lambda x: x.get('created_at', ''), reverse=(sort_order == "desc"))
+        elif sort_by == "tools_count":
             def get_tools_count(agent):
-                # Get version data if available
-                version_data = agent_version_map.get(agent['agent_id'])
-                
-                # Use version data for tools if available, otherwise fallback to agent data
-                if version_data:
-                    configured_mcps = version_data.get('configured_mcps', [])
-                    agentpress_tools = version_data.get('agentpress_tools', {})
-                else:
-                    configured_mcps = agent.get('configured_mcps', [])
-                    agentpress_tools = agent.get('agentpress_tools', {})
+                configured_mcps = agent.get('configured_mcps', [])
+                agentpress_tools = agent.get('agentpress_tools', {})
                 
                 mcp_count = len(configured_mcps)
                 agentpress_count = sum(
@@ -1527,17 +1850,19 @@ async def get_agents(
                 return mcp_count + agentpress_count
             
             agents_data.sort(key=get_tools_count, reverse=(sort_order == "desc"))
+        else:
+            # Default to created_at
+            agents_data.sort(key=lambda x: x.get('created_at', ''), reverse=(sort_order == "desc"))
         
-        # Apply pagination to filtered results if we did post-processing
-        if has_mcp_tools is not None or has_agentpress_tools is not None or tools or sort_by == "tools_count":
-            total_count = len(agents_data)
-            agents_data = agents_data[offset:offset + limit]
+        # Update total count and apply pagination
+        total_count = len(agents_data)
+        agents_data = agents_data[offset:offset + limit]
         
         # Format the response
         agent_list = []
         for agent in agents_data:
             current_version = None
-            # Use already fetched version data from agent_version_map
+            # Use version data from agent_version_map
             version_dict = agent_version_map.get(agent['agent_id'])
             if version_dict:
                 try:
@@ -1552,37 +1877,29 @@ async def get_agents(
                         custom_mcps=version_dict.get('custom_mcps', []),
                         agentpress_tools=version_dict.get('agentpress_tools', {}),
                         is_active=version_dict.get('is_active', True),
-                        created_at=version_dict['created_at'],
-                        updated_at=version_dict.get('updated_at', version_dict['created_at']),
+                        created_at=version_dict.get('created_at', '2024-01-01T00:00:00Z'),
+                        updated_at=version_dict.get('updated_at', '2024-01-01T00:00:00Z'),
                         created_by=version_dict.get('created_by')
                     )
                 except Exception as e:
-                    logger.warning(f"Failed to get version data for agent {agent['agent_id']}: {e}")
+                    logger.warning(f"Failed to create version response for agent {agent['agent_id']}: {e}")
             
-            # Extract configuration using the unified config approach
-            from agent.config_helper import extract_agent_config
-            agent_config = extract_agent_config(agent, version_dict)
-            
-            system_prompt = agent_config['system_prompt']
-            configured_mcps = agent_config['configured_mcps']
-            custom_mcps = agent_config['custom_mcps']
-            agentpress_tools = agent_config['agentpress_tools']
-            
+            # Use agent data directly (no need for extract_agent_config)
             agent_list.append(AgentResponse(
                 agent_id=agent['agent_id'],
                 account_id=agent['account_id'],
                 name=agent['name'],
                 description=agent.get('description'),
-                system_prompt=system_prompt,
-                configured_mcps=configured_mcps,
-                custom_mcps=custom_mcps,
-                agentpress_tools=agentpress_tools,
+                system_prompt=agent.get('system_prompt', ''),
+                configured_mcps=agent.get('configured_mcps', []),
+                custom_mcps=agent.get('custom_mcps', []),
+                agentpress_tools=agent.get('agentpress_tools', {}),
                 is_default=agent.get('is_default', False),
                 is_public=agent.get('is_public', False),
                 tags=agent.get('tags', []),
-                avatar=agent_config.get('avatar'),
-                avatar_color=agent_config.get('avatar_color'),
-                profile_image_url=agent_config.get('profile_image_url'),
+                avatar=agent.get('avatar'),
+                avatar_color=agent.get('avatar_color'),
+                profile_image_url=agent.get('profile_image_url'),
                 created_at=agent['created_at'],
                 updated_at=agent['updated_at'],
                 current_version_id=agent.get('current_version_id'),
@@ -2480,11 +2797,16 @@ async def get_agent_builder_chat_history(
         
         latest_thread_id = agent_builder_threads[0]['thread_id']
         logger.info(f"Found {len(agent_builder_threads)} agent builder threads, using latest: {latest_thread_id}")
-        messages_result = await client.table('messages').select('*').eq('thread_id', latest_thread_id).neq('type', 'status').neq('type', 'summary').order('created_at', desc=False).execute()
+        # 从ADK events表查询消息（按时间排序）
+        messages_result = await client.schema('public').table('events').select('*').eq('session_id', latest_thread_id).order('timestamp', desc=False).execute()
         
-        logger.info(f"Found {len(messages_result.data)} messages for agent builder chat history")
+        logger.info(f"Found {len(messages_result.data)} events for agent builder chat history")
+        
+        # 转换ADK events为消息格式
+        messages = _convert_adk_events_to_messages(messages_result.data)
+        
         return {
-            "messages": messages_result.data,
+            "messages": messages,
             "thread_id": latest_thread_id
         }
         
@@ -2843,7 +3165,7 @@ async def update_custom_mcp_tools_for_agent(
             if mcp_type == 'composio':
                 try:
                     from composio_integration.composio_profile_service import ComposioProfileService
-                    from services.supabase import DBConnection
+                    from services.postgresql import DBConnection
                     profile_service = ComposioProfileService(DBConnection())
  
                     profile_id = mcp_url
@@ -2952,22 +3274,23 @@ async def get_agent_tools(
     return {"agentpress_tools": agentpress_tools, "mcp_tools": mcp_tools}
 
 
-
 @router.get("/threads")
 async def get_user_threads(
     user_id: str = Depends(get_current_user_id_from_jwt),
     page: Optional[int] = Query(1, ge=1, description="Page number (1-based)"),
     limit: Optional[int] = Query(1000, ge=1, le=1000, description="Number of items per page (max 1000)")
 ):
-    """Get all threads for the current user with associated project data."""
+    """获取当前用户的所有对话线程，包含关联的项目数据"""
     logger.info(f"Fetching threads with project data for user: {user_id} (page={page}, limit={limit})")
     client = await db.client
     try:
+        # 计算分页偏移量
         offset = (page - 1) * limit
         
-        # First, get threads for the user
+        # 步骤1: 从threads表中获取指定用户的所有对话线程，按创建时间倒序排列
         threads_result = await client.table('threads').select('*').eq('account_id', user_id).order('created_at', desc=True).execute()
         
+        # 如果没有找到任何线程，返回空结果
         if not threads_result.data:
             logger.info(f"No threads found for user: {user_id}")
             return {
@@ -2980,35 +3303,37 @@ async def get_user_threads(
                 }
             }
         
+        # 获取总线程数量
         total_count = len(threads_result.data)
         
-        # Apply pagination to threads
+        # 步骤2: 对线程数据进行分页处理
         paginated_threads = threads_result.data[offset:offset + limit]
         
-        # Extract unique project IDs from threads that have them
+        # 步骤3: 提取所有线程中关联的项目ID，并去重
         project_ids = [
             thread['project_id'] for thread in paginated_threads 
             if thread.get('project_id')
         ]
         unique_project_ids = list(set(project_ids)) if project_ids else []
         
-        # Fetch projects if we have project IDs
+        # 步骤4: 如果有项目ID，则批量获取项目数据
         projects_by_id = {}
         if unique_project_ids:
             projects_result = await client.table('projects').select('*').in_('project_id', unique_project_ids).execute()
             
             if projects_result.data:
                 logger.info(f"[API] Raw projects from DB: {len(projects_result.data)}")
-                # Create a lookup map of projects by ID
+                # 创建项目ID到项目数据的映射表，便于快速查找
                 projects_by_id = {
                     project['project_id']: project 
                     for project in projects_result.data
                 }
         
-        # Map threads with their associated projects
+        # 步骤5: 将线程数据与项目数据进行关联映射
         mapped_threads = []
         for thread in paginated_threads:
             project_data = None
+            # 如果线程有关联的项目，则获取项目数据
             if thread.get('project_id') and thread['project_id'] in projects_by_id:
                 project = projects_by_id[thread['project_id']]
                 project_data = {
@@ -3022,6 +3347,7 @@ async def get_user_threads(
                     "updated_at": project['updated_at']
                 }
             
+            # 构建线程数据结构，包含关联的项目信息
             mapped_thread = {
                 "thread_id": thread['thread_id'],
                 "account_id": thread['account_id'],
@@ -3030,14 +3356,16 @@ async def get_user_threads(
                 "is_public": thread.get('is_public', False),
                 "created_at": thread['created_at'],
                 "updated_at": thread['updated_at'],
-                "project": project_data
+                "project": project_data  # 关联的项目数据
             }
             mapped_threads.append(mapped_thread)
         
+        # 步骤6: 计算总页数
         total_pages = (total_count + limit - 1) // limit if total_count else 0
         
         logger.info(f"[API] Mapped threads for frontend: {len(mapped_threads)} threads, {len(projects_by_id)} unique projects")
         
+        # 步骤7: 返回结果，包含线程列表和分页信息
         return {
             "threads": mapped_threads,
             "pagination": {
@@ -3053,33 +3381,175 @@ async def get_user_threads(
         raise HTTPException(status_code=500, detail=f"Failed to fetch threads: {str(e)}")
 
 
+@router.get("/projects/{project_id}")
+async def get_project(
+    project_id: str,
+    user_id: str = Depends(get_current_user_id_from_jwt)
+):
+    """Get a specific project by ID with complete related data."""
+    print(f"🔄 ===== 开始获取项目信息 =====")
+    print(f"  📋 project_id: {project_id}")
+    print(f"  👤 user_id: {user_id}")
+    logger.info(f"Fetching project: {project_id}")
+    client = await db.client
+    
+    try:
+        print(f"  📊 获取项目数据...")
+        project_result = await client.table('projects').select('*').eq('project_id', project_id).execute()
+        
+        if not project_result.data:
+            print(f"  ❌ 项目未找到: {project_id}")
+            raise HTTPException(status_code=404, detail="Project not found")
+        
+        project = project_result.data[0]
+        print(f"  ✅ 项目数据获取成功")
+        print(f"    📝 项目信息: name={project.get('name')}, account_id={project.get('account_id')}")
+        
+        # 验证项目访问权限
+        if project.get('account_id') != user_id:
+            print(f"  ❌ 项目访问权限被拒绝: account_id={project.get('account_id')}, user_id={user_id}")
+            raise HTTPException(status_code=403, detail="Access denied")
+        
+        print(f"  ✅ 项目访问权限验证通过")
+        
+        # 获取项目关联的线程
+        print(f"  💬 获取项目关联的线程...")
+        threads_result = await client.table('threads').select('*').eq('project_id', project_id).order('created_at', desc=True).execute()
+        threads_data = []
+        if threads_result.data:
+            print(f"    📋 找到 {len(threads_result.data)} 个关联线程")
+            threads_data = [{
+                "thread_id": thread['thread_id'],
+                "account_id": thread['account_id'],
+                "metadata": thread.get('metadata', {}),
+                "is_public": thread.get('is_public', False),
+                "created_at": thread['created_at'],
+                "updated_at": thread['updated_at']
+            } for thread in threads_result.data]
+            
+            # 打印最近的几个线程
+            for i, thread in enumerate(threads_result.data[:3]):  # 只显示前3个
+                print(f"      {i+1}. thread_id: {thread['thread_id']}, created_at: {thread['created_at']}")
+        else:
+            print(f"    ⏭️ 无关联线程")
+        
+        # 获取项目相关的Agent运行记录
+        print(f"  🤖 获取项目相关的Agent运行记录...")
+        agent_runs_result = await client.table('agent_runs').select('*').in_('thread_id', [t['thread_id'] for t in threads_data]).order('created_at', desc=True).execute()
+        agent_runs_data = []
+        if agent_runs_result.data:
+            print(f"    📋 找到 {len(agent_runs_result.data)} 条Agent运行记录")
+            agent_runs_data = [{
+                "id": run['id'],
+                "thread_id": run['thread_id'],
+                "status": run.get('status', ''),
+                "started_at": run.get('started_at'),
+                "completed_at": run.get('completed_at'),
+                "error": run.get('error'),
+                "agent_id": run.get('agent_id'),
+                "agent_version_id": run.get('agent_version_id'),
+                "created_at": run['created_at']
+            } for run in agent_runs_result.data]
+            
+            # 打印最近的几条运行记录
+            for i, run in enumerate(agent_runs_result.data[:3]):  # 只显示前3条
+                print(f"      {i+1}. ID: {run['id']}, 状态: {run.get('status', 'N/A')}, 线程: {run.get('thread_id')}")
+        else:
+            print(f"    ⏭️ 无Agent运行记录")
+        
+        # 统计项目总消息数
+        print(f"  📊 统计项目总消息数...")
+        total_message_count = 0
+        if threads_data:
+            for thread in threads_data:
+                message_count_result = await client.schema('public').table('events').select('id', count='exact').eq('session_id', thread['thread_id']).execute()
+                thread_message_count = message_count_result.count if message_count_result.count is not None else 0
+                total_message_count += thread_message_count
+                print(f"    📈 线程 {thread['thread_id']}: {thread_message_count} 条消息")
+        
+        print(f"    📈 项目总消息数: {total_message_count}")
+        
+        # 构建返回数据
+        print(f"  🔄 构建返回数据...")
+        mapped_project = {
+            "project_id": project['project_id'],
+            "name": project.get('name', ''),
+            "description": project.get('description', ''),
+            "account_id": project['account_id'],
+            "sandbox": project.get('sandbox', {}),
+            "is_public": project.get('is_public', False),
+            "created_at": project['created_at'],
+            "updated_at": project['updated_at'],
+            "threads": threads_data,
+            "agent_runs": agent_runs_data,
+            "total_message_count": total_message_count,
+            "thread_count": len(threads_data)
+        }
+        
+        print(f"  ✅ 数据构建完成")
+        print(f"    📊 返回数据概览:")
+        print(f"      - project_id: {mapped_project['project_id']}")
+        print(f"      - name: {mapped_project['name']}")
+        print(f"      - account_id: {mapped_project['account_id']}")
+        print(f"      - thread_count: {mapped_project['thread_count']}")
+        print(f"      - total_message_count: {mapped_project['total_message_count']}")
+        print(f"      - agent_runs_count: {len(mapped_project['agent_runs'])}")
+        print(f"      - has_sandbox: {bool(mapped_project['sandbox'])}")
+        
+        logger.info(f"[API] Mapped project for frontend: {project_id} with {len(threads_data)} threads and {total_message_count} total messages")
+        print(f"🎉 ===== 项目信息获取完成 =====")
+        return mapped_project
+        
+    except HTTPException:
+        print(f"  ❌ HTTP异常: {e}")
+        raise
+    except Exception as e:
+        print(f"  ❌ 获取项目信息失败: {str(e)}")
+        logger.error(f"Error fetching project {project_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to fetch project: {str(e)}")
+
+
 @router.get("/threads/{thread_id}")
 async def get_thread(
     thread_id: str,
     user_id: str = Depends(get_current_user_id_from_jwt)
 ):
     """Get a specific thread by ID with complete related data."""
+    print(f"🔄 ===== 开始获取线程信息 =====")
+    print(f"  📋 thread_id: {thread_id}")
+    print(f"  👤 user_id: {user_id}")
     logger.info(f"Fetching thread: {thread_id}")
     client = await db.client
     
     try:
+        print(f"  🔐 验证线程访问权限...")
         await verify_thread_access(client, thread_id, user_id)
+        print(f"  ✅ 线程访问权限验证通过")
         
         # Get the thread data
+        print(f"  📊 获取线程数据...")
         thread_result = await client.table('threads').select('*').eq('thread_id', thread_id).execute()
         
         if not thread_result.data:
+            print(f"  ❌ 线程未找到: {thread_id}")
             raise HTTPException(status_code=404, detail="Thread not found")
         
         thread = thread_result.data[0]
+        print(f"  ✅ 线程数据获取成功")
+        print(f"    📝 线程信息: account_id={thread.get('account_id')}, project_id={thread.get('project_id')}")
         
         # Get associated project if thread has a project_id
+        print(f"  📁 检查关联项目...")
         project_data = None
         if thread.get('project_id'):
+            print(f"    🔍 线程关联项目ID: {thread['project_id']}")
             project_result = await client.table('projects').select('*').eq('project_id', thread['project_id']).execute()
             
             if project_result.data:
                 project = project_result.data[0]
+                print(f"    ✅ 项目数据获取成功")
+                print(f"      📝 项目名称: {project.get('name', 'N/A')}")
+                print(f"      📝 项目描述: {project.get('description', 'N/A')}")
                 logger.info(f"[API] Raw project from DB for thread {thread_id}")
                 project_data = {
                     "project_id": project['project_id'],
@@ -3091,15 +3561,24 @@ async def get_thread(
                     "created_at": project['created_at'],
                     "updated_at": project['updated_at']
                 }
+            else:
+                print(f"    ⚠️ 项目未找到: {thread['project_id']}")
+        else:
+            print(f"    ⏭️ 线程无关联项目")
         
         # Get message count for the thread
-        message_count_result = await client.table('messages').select('message_id', count='exact').eq('thread_id', thread_id).execute()
+        print(f"  📊 统计消息数量...")
+        # 从ADK events表统计消息数量
+        message_count_result = await client.schema('public').table('events').select('id', count='exact').eq('session_id', thread_id).execute()
         message_count = message_count_result.count if message_count_result.count is not None else 0
+        print(f"    📈 消息总数: {message_count}")
         
         # Get recent agent runs for the thread
+        print(f"  🤖 获取最近的Agent运行记录...")
         agent_runs_result = await client.table('agent_runs').select('*').eq('thread_id', thread_id).order('created_at', desc=True).execute()
         agent_runs_data = []
         if agent_runs_result.data:
+            print(f"    📋 找到 {len(agent_runs_result.data)} 条Agent运行记录")
             agent_runs_data = [{
                 "id": run['id'],
                 "status": run.get('status', ''),
@@ -3110,8 +3589,15 @@ async def get_thread(
                 "agent_version_id": run.get('agent_version_id'),
                 "created_at": run['created_at']
             } for run in agent_runs_result.data]
+            
+            # 打印最近的几条运行记录
+            for i, run in enumerate(agent_runs_result.data[:3]):  # 只显示前3条
+                print(f"      {i+1}. ID: {run['id']}, 状态: {run.get('status', 'N/A')}, 开始时间: {run.get('started_at')}")
+        else:
+            print(f"    ⏭️ 无Agent运行记录")
         
         # Map thread data for frontend (matching actual DB structure)
+        print(f"  🔄 构建返回数据...")
         mapped_thread = {
             "thread_id": thread['thread_id'],
             "account_id": thread['account_id'],
@@ -3125,12 +3611,24 @@ async def get_thread(
             "recent_agent_runs": agent_runs_data
         }
         
+        print(f"  ✅ 数据构建完成")
+        print(f"    📊 返回数据概览:")
+        print(f"      - thread_id: {mapped_thread['thread_id']}")
+        print(f"      - account_id: {mapped_thread['account_id']}")
+        print(f"      - project_id: {mapped_thread['project_id']}")
+        print(f"      - message_count: {mapped_thread['message_count']}")
+        print(f"      - agent_runs_count: {len(mapped_thread['recent_agent_runs'])}")
+        print(f"      - has_project: {mapped_thread['project'] is not None}")
+        
         logger.info(f"[API] Mapped thread for frontend: {thread_id} with {message_count} messages and {len(agent_runs_data)} recent runs")
+        print(f"🎉 ===== 线程信息获取完成 =====")
         return mapped_thread
         
     except HTTPException:
+        print(f"  ❌ HTTP异常: {e}")
         raise
     except Exception as e:
+        print(f"  ❌ 获取线程信息失败: {str(e)}")
         logger.error(f"Error fetching thread {thread_id}: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to fetch thread: {str(e)}")
 
@@ -3154,12 +3652,12 @@ async def create_thread(
     try:
         # 1. Create Project
         project_name = name or "New Project"
-        project = await client.table('projects').insert({
+        project = await client.schema('public').table('projects').insert({
             "project_id": str(uuid.uuid4()), 
             "account_id": account_id, 
             "name": project_name,
-            "created_at": datetime.now(timezone.utc).isoformat()
-        }).execute()
+            "created_at": datetime.now()
+        })
         project_id = project.data[0]['project_id']
         logger.info(f"Created new project: {project_id}")
 
@@ -3216,7 +3714,7 @@ async def create_thread(
             "thread_id": str(uuid.uuid4()), 
             "project_id": project_id, 
             "account_id": account_id,
-            "created_at": datetime.now(timezone.utc).isoformat()
+            "created_at": datetime.now()
         }
 
         structlog.contextvars.bind_contextvars(
@@ -3225,7 +3723,7 @@ async def create_thread(
             account_id=account_id,
         )
         
-        thread = await client.table('threads').insert(thread_data).execute()
+        thread = await client.schema('public').table('threads').insert(thread_data)
         thread_id = thread.data[0]['thread_id']
         logger.info(f"Created new thread: {thread_id}")
 
@@ -3253,17 +3751,21 @@ async def get_thread_messages(
         offset = 0
         all_messages = []
         while True:
-            query = client.table('messages').select('*').eq('thread_id', thread_id)
-            query = query.order('created_at', desc=(order == "desc"))
+            # 从ADK events表查询消息
+            query = client.schema('public').table('events').select('*').eq('session_id', thread_id)
+            query = query.order('timestamp', desc=(order == "desc"))
             query = query.range(offset, offset + batch_size - 1)
             messages_result = await query.execute()
             batch = messages_result.data or []
             all_messages.extend(batch)
-            logger.debug(f"Fetched batch of {len(batch)} messages (offset {offset})")
+            logger.debug(f"Fetched batch of {len(batch)} events (offset {offset})")
             if len(batch) < batch_size:
                 break
             offset += batch_size
-        return {"messages": all_messages}
+        
+        # 转换ADK events为消息格式
+        converted_messages = _convert_adk_events_to_messages(all_messages)
+        return {"messages": converted_messages}
     except Exception as e:
         logger.error(f"Error fetching messages for thread {thread_id}: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to fetch messages: {str(e)}")
@@ -3282,10 +3784,11 @@ async def get_agent_run(
     logger.warning(f"[DEPRECATED] Fetching agent run: {agent_run_id}")
     client = await db.client
     try:
-        agent_run_result = await client.table('agent_runs').select('*').eq('agent_run_id', agent_run_id).eq('account_id', user_id).execute()
-        if not agent_run_result.data:
-            raise HTTPException(status_code=404, detail="Agent run not found")
-        return agent_run_result.data[0]
+        # 使用正确的访问检查函数
+        agent_run_data = await get_agent_run_with_access_check(client, agent_run_id, user_id)
+        return agent_run_data
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error fetching agent run {agent_run_id}: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to fetch agent run: {str(e)}")  
@@ -3302,16 +3805,18 @@ async def add_message_to_thread(
     client = await db.client
     await verify_thread_access(client, thread_id, user_id)
     try:
-        message_result = await client.table('messages').insert({
-            'thread_id': thread_id,
-            'type': 'user',
-            'is_llm_message': True,
-            'content': {
-              "role": "user",
-              "content": message
-            }
-        }).execute()
-        return message_result.data[0]
+        # 使用ADK events表记录用户消息
+        message_id = str(uuid.uuid4())
+        event_id = await _log_adk_user_message_event(client, user_id, message, thread_id, message_id)
+        
+        # 返回消息格式（模拟原messages表结构）
+        return {
+            "message_id": message_id,
+            "thread_id": thread_id,
+            "type": "user",
+            "content": {"role": "user", "content": message},
+            "event_id": event_id
+        }
     except Exception as e:
         logger.error(f"Error adding message to thread {thread_id}: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to add message: {str(e)}")
@@ -3341,16 +3846,28 @@ async def create_message(
             "type": message_data.type,
             "is_llm_message": message_data.is_llm_message,
             "content": message_payload,  # Store as JSONB object, not JSON string
-            "created_at": datetime.now(timezone.utc).isoformat()
+            "created_at": datetime.now()
         }
         
-        message_result = await client.table('messages').insert(insert_data).execute()
+        # 使用ADK events表记录消息
+        if message_data.type == "user":
+            event_id = await _log_adk_user_message_event(client, user_id, message_payload.get("content", ""), thread_id, insert_data["message_id"])
+        else:
+            event_id = await _log_adk_agent_response_event(client, user_id, message_payload.get("content", ""), thread_id, "unknown")
         
-        if not message_result.data:
-            raise HTTPException(status_code=500, detail="Failed to create message")
+        # 构建返回数据（模拟原messages表结构）
+        created_message = {
+            "message_id": insert_data["message_id"],
+            "thread_id": thread_id,
+            "type": message_data.type,
+            "is_llm_message": message_data.is_llm_message,
+            "content": message_payload,
+            "created_at": insert_data["created_at"].isoformat(),
+            "event_id": event_id
+        }
         
-        logger.info(f"Created message: {message_result.data[0]['message_id']}")
-        return message_result.data[0]
+        logger.info(f"Created message: {created_message['message_id']}")
+        return created_message
         
     except HTTPException:
         raise
@@ -3371,7 +3888,8 @@ async def delete_message(
     await verify_thread_access(client, thread_id, user_id)
     try:
         # Don't allow users to delete the "status" messages
-        await client.table('messages').delete().eq('message_id', message_id).eq('is_llm_message', True).eq('thread_id', thread_id).execute()
+        # 从ADK events表删除消息（通过message_id在content中查找）
+        await client.schema('public').table('events').delete().eq('session_id', thread_id).filter('content', 'cs', f'{{"message_id":"{message_id}"}}').execute()
         return {"message": "Message deleted successfully"}
     except Exception as e:
         logger.error(f"Error deleting message {message_id} from thread {thread_id}: {str(e)}")
@@ -3593,3 +4111,139 @@ async def upload_agent_profile_image(
     except Exception as e:
         logger.error(f"Failed to upload agent profile image for user {user_id}: {e}")
         raise HTTPException(status_code=500, detail="Failed to upload profile image")
+
+
+async def _create_adk_session_if_not_exists(client, user_id: str, session_id: str, app_name: str = "fufanmanus"):
+    """如果ADK session不存在则创建"""
+    try:
+        # 检查session是否已存在
+        async with client.pool.acquire() as conn:
+            existing = await conn.fetchrow(
+                """
+                SELECT id FROM sessions 
+                WHERE app_name = $1 AND user_id = $2 AND id = $3
+                """,
+                app_name, user_id, session_id
+            )
+            
+            if not existing:
+                # 不存在则创建
+                await conn.execute(
+                    """
+                    INSERT INTO sessions (
+                        app_name, user_id, id, state, create_time, update_time
+                    )
+                    VALUES ($1, $2, $3, $4, $5, $6)
+                    """,
+                    app_name, user_id, session_id, '{}', datetime.now(), datetime.now()
+                )
+                logger.info(f"创建ADK session: {session_id}")
+            else:
+                logger.debug(f"ADK session已存在: {session_id}")
+                
+    except Exception as e:
+        logger.error(f"创建ADK session失败: {e}")
+        raise
+
+async def _log_adk_user_message_event(client, user_id: str, message_content: str, session_id: str, message_id: str, app_name: str = "fufanmanus"):
+    """记录用户消息事件到ADK events表"""
+    try:
+        import uuid
+        event_id = str(uuid.uuid4())
+        invocation_id = str(uuid.uuid4())
+        
+        # 构建消息内容
+        content = {
+            "role": "user", 
+            "content": message_content,
+            "message_id": message_id
+        }
+        
+        # 插入到ADK events表
+        async with client.pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO events (
+                    id, app_name, user_id, session_id, invocation_id, 
+                    author, timestamp, content, actions
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                """,
+                event_id, app_name, user_id, session_id, invocation_id,
+                "user", datetime.now(), json.dumps(content), b''  # actions为空字节
+            )
+        
+        logger.info(f"记录用户消息事件成功: {event_id}")
+        return event_id
+        
+    except Exception as e:
+        logger.error(f"记录用户消息事件失败: {e}")
+        raise
+
+
+async def _log_adk_agent_response_event(client, user_id: str, response_content: str, session_id: str, model_name: str, app_name: str = "fufanmanus"):
+    """记录AI代理回复事件到ADK events表"""
+    try:
+        import uuid
+        event_id = str(uuid.uuid4())
+        invocation_id = str(uuid.uuid4())
+        
+        # 构建回复内容
+        content = {
+            "role": "assistant",
+            "content": response_content,
+            "model": model_name
+        }
+        
+        # 插入到ADK events表
+        async with client.pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO events (
+                    id, app_name, user_id, session_id, invocation_id, 
+                    author, timestamp, content, actions, turn_complete
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                """,
+                event_id, app_name, user_id, session_id, invocation_id,
+                "assistant", datetime.now(), json.dumps(content), b'', True  # turn_complete=True
+            )
+        
+        logger.info(f"记录AI回复事件成功: {event_id}")
+        return event_id
+        
+    except Exception as e:
+        logger.error(f"记录AI回复事件失败: {e}")
+        raise
+
+def _convert_adk_events_to_messages(events):
+    """将ADK events表数据转换为messages表格式"""
+    messages = []
+    
+    for event in events:
+        try:
+            # 解析content字段
+            content = event.get('content')
+            if isinstance(content, str):
+                import json
+                content = json.loads(content)
+            
+            # 转换为messages表格式
+            message = {
+                "message_id": content.get("message_id", event["id"]),
+                "thread_id": event["session_id"], 
+                "type": content.get("role", event.get("author", "user")),
+                "is_llm_message": True,
+                "content": content,
+                "created_at": event["timestamp"],
+                "author": event.get("author", "user"),
+                "event_id": event["id"]
+            }
+            
+            messages.append(message)
+            
+        except Exception as e:
+            logger.warning(f"跳过格式错误的事件 {event.get('id', 'unknown')}: {e}")
+            continue
+    
+    return messages

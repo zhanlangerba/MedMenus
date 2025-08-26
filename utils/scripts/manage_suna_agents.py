@@ -33,7 +33,7 @@ from pathlib import Path
 backend_dir = Path(__file__).parent.parent
 sys.path.insert(0, str(backend_dir))
 
-from utils.suna_default_agent_service import SunaDefaultAgentService
+from utils.fufanmanus_default_agent_service import SunaDefaultAgentService
 from services.supabase import DBConnection
 from utils.logger import logger
 

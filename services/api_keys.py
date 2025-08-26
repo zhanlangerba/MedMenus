@@ -20,7 +20,7 @@ import time
 from pydantic import BaseModel, Field, field_validator
 from fastapi import HTTPException
 from utils.logger import logger
-from services.supabase import DBConnection
+from services.postgresql import DBConnection
 from services import redis
 from utils.config import config
 

@@ -11,7 +11,7 @@ from jwt.exceptions import PyJWTError
 from utils.logger import structlog
 from utils.config import config
 import os
-from services.supabase import DBConnection
+from services.postgresql import DBConnection
 from services import redis
 from utils.jwt_auth import JWTAuth
 

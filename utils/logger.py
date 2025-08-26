@@ -1,21 +1,25 @@
-import structlog, logging, os
+import structlog, logging, os # type: ignore
 
 ENV_MODE = os.getenv("ENV_MODE", "LOCAL")
 
-# Set default logging level based on environment
+# 根据环境设置默认日志级别
 if ENV_MODE.upper() == "PRODUCTION":
-    default_level = "DEBUG"
+    default_level = "WARNING"  # 生产环境只显示警告和错误
 else:
-    default_level = "INFO"
+    default_level = "WARNING"  # 开发环境也设置为警告级别，减少控制台输出
 
 LOGGING_LEVEL = logging.getLevelNamesMapping().get(
     os.getenv("LOGGING_LEVEL", default_level).upper(), 
-    logging.DEBUG if ENV_MODE.upper() == "PRODUCTION" else logging.INFO
+    logging.WARNING  # 默认使用WARNING级别
 )
 
-renderer = [structlog.processors.JSONRenderer()]
-# if ENV_MODE.lower() == "local".lower() or ENV_MODE.lower() == "staging".lower():
-#     renderer = [structlog.dev.ConsoleRenderer()]
+# 根据环境选择渲染器
+if ENV_MODE.lower() == "local":
+    # 本地开发环境使用更友好的控制台输出
+    renderer = [structlog.dev.ConsoleRenderer()]
+else:
+    # 其他环境使用JSON格式
+    renderer = [structlog.processors.JSONRenderer()]
 
 structlog.configure(
     processors=[

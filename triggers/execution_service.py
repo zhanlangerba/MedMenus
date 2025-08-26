@@ -317,7 +317,7 @@ class AgentExecutor:
             }
         }).execute()
         
-        agent_run_id = agent_run.data[0]['id']
+        agent_run_id = str(agent_run.data[0]['id'])
         
         await self._register_agent_run(agent_run_id)
         
@@ -586,7 +586,7 @@ class WorkflowExecutor:
             }
         }).execute()
         
-        agent_run_id = agent_run.data[0]['id']
+        agent_run_id = str(agent_run.data[0]['id'])
         
         await self._register_workflow_run(agent_run_id)
         

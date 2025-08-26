@@ -9,12 +9,12 @@ from typing import Optional, Dict, Tuple
 import stripe
 from datetime import datetime, timezone, timedelta
 
-from supabase import Client as SupabaseClient
+# from supabase import Client as SupabaseClient
 from utils.cache import Cache
 from utils.logger import logger
 from utils.config import config, EnvMode
-from services.supabase import DBConnection
-from utils.auth_utils import get_current_user_id_from_jwt
+from services.postgresql import DBConnection
+from utils.simple_auth_middleware import get_current_user_id_from_jwt
 from pydantic import BaseModel
 from utils.constants import MODEL_ACCESS_TIERS, MODEL_NAME_ALIASES, HARDCODED_MODEL_PRICES
 from litellm.cost_calculator import cost_per_token

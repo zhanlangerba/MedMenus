@@ -79,8 +79,8 @@ async def create_database_tables():
     
     # 检查迁移文件是否存在
     migration_files = [
-        "migrations/hybrid_auth_tables.sql",
-        "migrations/init_auth_tables.sql"
+        # "../migrations/hybrid_auth_tables.sql",
+        # "../migrations/init_auth_tables.sql"
     ]
     
     selected_migration = None

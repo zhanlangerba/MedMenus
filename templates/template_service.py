@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from typing import Dict, List, Any, Optional
 from uuid import uuid4
 
-from services.supabase import DBConnection
+from services.postgresql import DBConnection
 from utils.logger import logger
 
 ConfigType = Dict[str, Any]
@@ -158,7 +158,7 @@ class TemplateService:
         if agent['account_id'] != creator_id:
             raise TemplateAccessDeniedError("You can only create templates from your own agents")
         
-        if self._is_suna_default_agent(agent):
+        if self._is_fufanmanus_default_agent(agent):
             raise SunaDefaultAgentTemplateError("Cannot create template from Suna default agent")
         
         version_config = await self._get_agent_version_config(agent)
@@ -509,7 +509,7 @@ class TemplateService:
         
         return sanitized
     
-    def _is_suna_default_agent(self, agent: Dict[str, Any]) -> bool:
+    def _is_fufanmanus_default_agent(self, agent: Dict[str, Any]) -> bool:
         metadata = agent.get('metadata', {})
         return metadata.get('is_suna_default', False)
     

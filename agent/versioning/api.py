@@ -3,7 +3,7 @@ from typing import List, Optional, Dict, Any
 from pydantic import BaseModel
 
 from utils.logger import logger
-from utils.auth_utils import get_current_user_id_from_jwt
+from utils.simple_auth_middleware import get_current_user_id_from_jwt
 
 from .version_service import (
     get_version_service,

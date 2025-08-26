@@ -20,9 +20,19 @@ from agentpress.response_processor import (
     ResponseProcessor,
     ProcessorConfig
 )
-from services.supabase import DBConnection
+from services.postgresql import DBConnection
 from utils.logger import logger
-from langfuse.client import StatefulGenerationClient, StatefulTraceClient
+try:
+    from langfuse.client import StatefulGenerationClient, StatefulTraceClient
+except ImportError:
+    # 对于 langfuse 3.x 版本，尝试不同的导入路径
+    try:
+        from langfuse import StatefulGenerationClient, StatefulTraceClient
+    except ImportError:
+        # 如果都失败，使用 Any 类型
+        from typing import Any
+        StatefulGenerationClient = Any
+        StatefulTraceClient = Any
 from services.langfuse import langfuse
 import datetime
 from litellm.utils import token_counter
@@ -178,10 +188,10 @@ class ThreadManager:
             raise
 
     async def get_llm_messages(self, thread_id: str) -> List[Dict[str, Any]]:
-        """Get all messages for a thread.
+        """Get all messages for a thread from events table.
 
-        This method uses the SQL function which handles context truncation
-        by considering summary messages.
+        This method fetches messages from the events table and formats them
+        for LLM consumption.
 
         Args:
             thread_id: The ID of the thread to get messages for.
@@ -189,24 +199,27 @@ class ThreadManager:
         Returns:
             List of message objects.
         """
-        logger.debug(f"Getting messages for thread {thread_id}")
+        logger.debug(f"Getting messages for thread {thread_id} from events table")
         client = await self.db.client
 
         try:
-            # result = await client.rpc('get_llm_formatted_messages', {'p_thread_id': thread_id}).execute()
-            
-            # Fetch messages in batches of 1000 to avoid overloading the database
-            all_messages = []
+            # Fetch events in batches of 1000 to avoid overloading the database
+            all_events = []
             batch_size = 1000
             offset = 0
             
             while True:
-                result = await client.table('messages').select('message_id, content').eq('thread_id', thread_id).eq('is_llm_message', True).order('created_at').range(offset, offset + batch_size - 1).execute()
+                # 从 events 表获取消息，按时间戳排序
+                result = await client.table('events').select(
+                    'id, author, content, timestamp'
+                ).eq('session_id', thread_id).in_(
+                    'author', ['user', 'assistant']
+                ).order('timestamp').range(offset, offset + batch_size - 1).execute()
                 
                 if not result.data or len(result.data) == 0:
                     break
                     
-                all_messages.extend(result.data)
+                all_events.extend(result.data)
                 
                 # If we got fewer than batch_size records, we've reached the end
                 if len(result.data) < batch_size:
@@ -214,28 +227,56 @@ class ThreadManager:
                     
                 offset += batch_size
             
-            # Use all_messages instead of result.data in the rest of the method
-            result_data = all_messages
-
-            # Parse the returned data which might be stringified JSON
-            if not result_data:
+            # Parse the returned data and convert to LLM message format
+            if not all_events:
                 return []
 
-            # Return properly parsed JSON objects
+            # Convert events to LLM message format
             messages = []
-            for item in result_data:
-                if isinstance(item['content'], str):
-                    try:
-                        parsed_item = json.loads(item['content'])
-                        parsed_item['message_id'] = item['message_id']
-                        messages.append(parsed_item)
-                    except json.JSONDecodeError:
-                        logger.error(f"Failed to parse message: {item['content']}")
-                else:
-                    content = item['content']
-                    content['message_id'] = item['message_id']
-                    messages.append(content)
+            for event in all_events:
+                try:
+                    # 确保event是字典格式
+                    if hasattr(event, '__dict__'):
+                        event = dict(event)
+                    
+                    # 解析事件内容
+                    content = event.get('content', {})
+                    if isinstance(content, str):
+                        try:
+                            content = json.loads(content)
+                        except json.JSONDecodeError:
+                            # 如果不是JSON，当作纯文本处理
+                            content = {"content": content}
+                    
+                    # 构建LLM消息格式
+                    message = {
+                        "role": event.get('author', 'user'),
+                        "message_id": event.get('id'),
+                        "timestamp": event.get('timestamp')
+                    }
+                    
+                    # 处理timestamp字段，确保datetime对象被转换为字符串
+                    if message.get('timestamp') and hasattr(message['timestamp'], 'isoformat'):
+                        message['timestamp'] = message['timestamp'].isoformat()
+                    
+                    # 处理内容格式
+                    if isinstance(content, dict):
+                        # 如果content是对象，提取文本内容
+                        if 'content' in content:
+                            message["content"] = content['content']
+                        else:
+                            # 如果没有content字段，将整个对象转为字符串
+                            message["content"] = json.dumps(content)
+                    else:
+                        message["content"] = str(content)
+                    
+                    messages.append(message)
+                    
+                except Exception as e:
+                    logger.error(f"Failed to parse event {event.get('id')}: {e}")
+                    continue
 
+            logger.debug(f"Retrieved {len(messages)} messages from events table for thread {thread_id}")
             return messages
 
         except Exception as e:
@@ -286,13 +327,13 @@ class ThreadManager:
             An async generator yielding response chunks or error dict
         """
 
-        logger.info(f"Starting thread execution for thread {thread_id}")
-        logger.info(f"Using model: {llm_model}")
-        logger.info(f"Parameters: model={llm_model}, temperature={llm_temperature}, max_tokens={llm_max_tokens}")
-        logger.info(f"Auto-continue: max={native_max_auto_continues}, XML tool limit={max_xml_tool_calls}")
+        print(f"Starting thread execution for thread {thread_id}")
+        print(f"Using model: {llm_model}")
+        print(f"Parameters: model={llm_model}, temperature={llm_temperature}, max_tokens={llm_max_tokens}")
+        print(f"Auto-continue: max={native_max_auto_continues}, XML tool limit={max_xml_tool_calls}")
 
         # Log model info
-        logger.info(f"🤖 Thread {thread_id}: Using model {llm_model}")
+        print(f"🤖 Thread {thread_id}: Using model {llm_model}")
 
         # Ensure processor_config is not None
         config = processor_config or ProcessorConfig()
@@ -386,49 +427,68 @@ When using the tools:
         # Define inner function to handle a single run
         async def _run_once(temp_msg=None):
             try:
+                print(f"🔄 ===== _run_once 开始执行 =====")
+                print(f"  📋 temp_msg: {temp_msg}")
+                
                 # Ensure config is available in this scope
                 nonlocal config
                 # Note: config is now guaranteed to exist due to check above
+                print(f"  ✅ config 获取成功")
 
                 # 1. Get messages from thread for LLM call
+                print(f"  🔄 开始获取消息...")
                 messages = await self.get_llm_messages(thread_id)
-
+                print(f"  ✅ 消息获取完成")
+                print(f"messages: {messages}")
                 # 2. Check token count before proceeding
+                print(f"  🔄 开始检查token数量...")
                 token_count = 0
                 try:
                     # Use the potentially modified working_system_prompt for token counting
+                    print(f"    📊 计算token数量...")
                     token_count = token_counter(model=llm_model, messages=[working_system_prompt] + messages)
                     token_threshold = self.context_manager.token_threshold
+                    print(f"    ✅ Token数量: {token_count}/{token_threshold} ({(token_count/token_threshold)*100:.1f}%)")
                     logger.info(f"Thread {thread_id} token count: {token_count}/{token_threshold} ({(token_count/token_threshold)*100:.1f}%)")
 
                 except Exception as e:
+                    print(f"    ❌ Token计算失败: {str(e)}")
                     logger.error(f"Error counting tokens or summarizing: {str(e)}")
 
                 # 3. Prepare messages for LLM call + add temporary message if it exists
+                print(f"  🔄 开始准备消息...")
                 # Use the working_system_prompt which may contain the XML examples
                 prepared_messages = [working_system_prompt]
+                print(f"    ✅ 系统提示词已添加")
 
                 # Find the last user message index
+                print(f"    🔍 查找最后用户消息索引...")
                 last_user_index = -1
                 for i, msg in enumerate(messages):
                     if isinstance(msg, dict) and msg.get('role') == 'user':
                         last_user_index = i
+                print(f"    📍 最后用户消息索引: {last_user_index}")
 
                 # Insert temporary message before the last user message if it exists
                 if temp_msg and last_user_index >= 0:
+                    print(f"    📝 在最后用户消息前插入临时消息...")
                     prepared_messages.extend(messages[:last_user_index])
                     prepared_messages.append(temp_msg)
                     prepared_messages.extend(messages[last_user_index:])
                     logger.debug("Added temporary message before the last user message")
                 else:
                     # If no user message or no temporary message, just add all messages
+                    print(f"    📝 添加所有消息...")
                     prepared_messages.extend(messages)
                     if temp_msg:
                         prepared_messages.append(temp_msg)
                         logger.debug("Added temporary message to the end of prepared messages")
+                print(f"    ✅ 消息准备完成，共 {len(prepared_messages)} 条消息")
 
                 # Add partial assistant content for auto-continue context (without saving to DB)
+                print(f"  🔄 检查是否需要添加部分助手内容...")
                 if auto_continue_count > 0 and continuous_state.get('accumulated_content'):
+                    print(f"    📝 添加部分助手内容...")
                     partial_content = continuous_state.get('accumulated_content', '')
                     
                     # Create temporary assistant message with just the text content
@@ -437,20 +497,23 @@ When using the tools:
                         "content": partial_content
                     }
                     prepared_messages.append(temporary_assistant_message)
+                    print(f"    ✅ 已添加部分助手内容，长度: {len(partial_content)} 字符")
                     logger.info(f"Added temporary assistant message with {len(partial_content)} chars for auto-continue context")
+                else:
+                    print(f"    ⏭️ 跳过添加部分助手内容")
 
-                # 4. Prepare tools for LLM call
-                openapi_tool_schemas = None
-                if config.native_tool_calling:
-                    openapi_tool_schemas = self.tool_registry.get_openapi_schemas()
-                    logger.debug(f"Retrieved {len(openapi_tool_schemas) if openapi_tool_schemas else 0} OpenAPI tool schemas")
+                # # 4. Prepare tools for LLM call
+                # openapi_tool_schemas = None
+                # if config.native_tool_calling:
+                #     openapi_tool_schemas = self.tool_registry.get_openapi_schemas()
+                #     logger.debug(f"Retrieved {len(openapi_tool_schemas) if openapi_tool_schemas else 0} OpenAPI tool schemas")
 
-                # print(f"\n\n\n\n prepared_messages: {prepared_messages}\n\n\n\n")
+                # # print(f"\n\n\n\n prepared_messages: {prepared_messages}\n\n\n\n")
 
-                prepared_messages = self.context_manager.compress_messages(prepared_messages, llm_model)
+                # prepared_messages = self.context_manager.compress_messages(prepared_messages, llm_model)
 
                 # 5. Make LLM API call
-                logger.debug("Making LLM API call")
+                print("Making LLM API call")
                 try:
                     if generation:
                         generation.update(
@@ -463,21 +526,32 @@ When using the tools:
                               "enable_thinking": enable_thinking,
                               "reasoning_effort": reasoning_effort,
                               "tool_choice": tool_choice,
-                              "tools": openapi_tool_schemas,
+                              # "tools": openapi_tool_schemas,
                             }
                         )
 
+                    print(f"我要开始执行 make_llm_api_call 了！！！！！！！！！！！！！")
+                    print(f"🔍 检查 prepared_messages 类型:")
+                    for i, msg in enumerate(prepared_messages):
+                        print(f"  [{i}] 类型: {type(msg)}, 内容: {str(msg)[:100]}...")
+                        if hasattr(msg, '__dict__'):
+                            print(f"    ⚠️ 发现非字典对象，转换为字典")
+                            prepared_messages[i] = dict(msg)
+                    print(f"🔍 检查 stream 类型:")
+                    print(f"  stream: {stream}")
                     llm_response = await make_llm_api_call(
                         prepared_messages, # Pass the potentially modified messages
                         llm_model,
                         temperature=llm_temperature,
                         max_tokens=llm_max_tokens,
-                        tools=openapi_tool_schemas,
+                        # tools=openapi_tool_schemas,
                         tool_choice=tool_choice if config.native_tool_calling else "none",
                         stream=stream,
                         enable_thinking=enable_thinking,
                         reasoning_effort=reasoning_effort
                     )
+
+                    print(f"llm_response: {llm_response}")
                     logger.debug("Successfully received raw LLM API response stream/object")
 
                 except Exception as e:
@@ -486,28 +560,137 @@ When using the tools:
 
                 # 6. Process LLM response using the ResponseProcessor
                 if stream:
+                    print("我进入的是 流式！！！")
                     logger.debug("Processing streaming response")
-                    # Ensure we have an async generator for streaming
-                    if hasattr(llm_response, '__aiter__'):
-                        response_generator = self.response_processor.process_streaming_response(
-                            llm_response=cast(AsyncGenerator, llm_response),
-                            thread_id=thread_id,
-                            config=config,
-                            prompt_messages=prepared_messages,
-                            llm_model=llm_model,
-                            can_auto_continue=(native_max_auto_continues > 0),
-                            auto_continue_count=auto_continue_count,
-                            continuous_state=continuous_state
-                        )
-                    else:
-                        # Fallback to non-streaming if response is not iterable
-                        response_generator = self.response_processor.process_non_streaming_response(
-                            llm_response=llm_response,
-                            thread_id=thread_id,
-                            config=config,
-                            prompt_messages=prepared_messages,
-                            llm_model=llm_model,
-                        )
+
+                    async def fake_response_generator():
+                        # 1. 开始事件
+                        yield {
+                            "sequence": 0,
+                            "message_id": "msg_001",
+                            "thread_id": "thread_123",
+                            "type": "status",
+                            "is_llm_message": False,
+                            "content": '{"status_type": "thread_run_start", "thread_run_id": "run_456"}',
+                            "metadata": '{"thread_run_id": "run_456"}',
+                            "created_at": "2025-08-25T10:30:00Z",
+                            "updated_at": "2025-08-25T10:30:00Z"
+                        }
+                        
+                        yield {
+                            "sequence": 1,
+                            "message_id": "msg_002", 
+                            "thread_id": "thread_123",
+                            "type": "status",
+                            "is_llm_message": False,
+                            "content": '{"status_type": "assistant_response_start"}',
+                            "metadata": '{"thread_run_id": "run_456"}',
+                            "created_at": "2025-08-25T10:30:01Z",
+                            "updated_at": "2025-08-25T10:30:01Z"
+                        }
+                        
+                        # 2. 内容块 (流式输出)
+                        yield {
+                            "sequence": 2,
+                            "message_id": None,  # 内容块不保存到数据库
+                            "thread_id": "thread_123",
+                            "type": "assistant",
+                            "is_llm_message": True,
+                            "content": '{"role": "assistant", "content": "你好！我是Suna.so"}',
+                            "metadata": '{"stream_status": "chunk", "thread_run_id": "run_456"}',
+                            "created_at": "2025-08-25T10:30:02Z",
+                            "updated_at": "2025-08-25T10:30:02Z"
+                        }
+                        
+                        yield {
+                            "sequence": 3,
+                            "message_id": None,
+                            "thread_id": "thread_123", 
+                            "type": "assistant",
+                            "is_llm_message": True,
+                            "content": '{"role": "assistant", "content": "，一个由Kortix团队创建的自主AI助手。"}',
+                            "metadata": '{"stream_status": "chunk", "thread_run_id": "run_456"}',
+                            "created_at": "2025-08-25T10:30:03Z",
+                            "updated_at": "2025-08-25T10:30:03Z"
+                        }
+                        
+                        # 3. 工具调用 (如果有的话)
+                        yield {
+                            "sequence": 4,
+                            "message_id": "msg_003",
+                            "thread_id": "thread_123",
+                            "type": "status", 
+                            "is_llm_message": True,
+                            "content": '{"role": "assistant", "status_type": "tool_started", "tool_name": "web_search", "tool_args": {"query": "最新科技新闻"}}',
+                            "metadata": '{"thread_run_id": "run_456", "tool_index": 0}',
+                            "created_at": "2025-08-25T10:30:04Z",
+                            "updated_at": "2025-08-25T10:30:04Z"
+                        }
+                        
+                        # 4. 工具结果
+                        yield {
+                            "sequence": 5,
+                            "message_id": "msg_004",
+                            "thread_id": "thread_123",
+                            "type": "tool",
+                            "is_llm_message": True,
+                            "content": '{"role": "tool", "tool_name": "web_search", "result": "找到了最新的科技新闻..."}',
+                            "metadata": '{"thread_run_id": "run_456", "tool_index": 0}',
+                            "created_at": "2025-08-25T10:30:05Z",
+                            "updated_at": "2025-08-25T10:30:05Z"
+                        }
+                        
+                        # 5. 最终助手消息 (保存到数据库)
+                        yield {
+                            "sequence": 6,
+                            "message_id": "msg_005",
+                            "thread_id": "thread_123",
+                            "type": "assistant",
+                            "is_llm_message": True,
+                            "content": '{"role": "assistant", "content": "你好！我是Suna.so，一个由Kortix团队创建的自主AI助手。我具备广泛的能力，可以执行复杂的任务..."}',
+                            "metadata": '{"thread_run_id": "run_456", "finish_reason": "stop"}',
+                            "created_at": "2025-08-25T10:30:06Z",
+                            "updated_at": "2025-08-25T10:30:06Z"
+                        }
+                        
+                        # 6. 结束事件
+                        yield {
+                            "sequence": 7,
+                            "message_id": "msg_006",
+                            "thread_id": "thread_123",
+                            "type": "status",
+                            "is_llm_message": False,
+                            "content": '{"status_type": "assistant_response_end", "finish_reason": "stop"}',
+                            "metadata": '{"thread_run_id": "run_456"}',
+                            "created_at": "2025-08-25T10:30:07Z",
+                            "updated_at": "2025-08-25T10:30:07Z"
+                        }
+                    
+                    response_generator = fake_response_generator()
+                    
+                    # # Ensure we have an async generator for streaming
+                    # if hasattr(llm_response, '__aiter__'):
+                    #     print("我发现有 __aiter__！！！")
+                    #     response_generator = self.response_processor.process_streaming_response(
+                    #         llm_response=cast(AsyncGenerator, llm_response),
+                    #         thread_id=thread_id,
+                    #         config=config,
+                    #         prompt_messages=prepared_messages,
+                    #         llm_model=llm_model,
+                    #         can_auto_continue=(native_max_auto_continues > 0),
+                    #         auto_continue_count=auto_continue_count,
+                    #         continuous_state=continuous_state
+                    #     )
+                    # else:
+                    #     print("我进入的是 非流式！！！")
+                    #     # Fallback to non-streaming if response is not iterable
+                    #     response_generator = self.response_processor.process_non_streaming_response(
+                    #         llm_response=llm_response,
+                    #         thread_id=thread_id,
+                    #         config=config,
+                    #         prompt_messages=prepared_messages,
+                    #         llm_model=llm_model,
+                    #     )
 
                     return response_generator
                 else:
@@ -622,12 +805,13 @@ When using the tools:
                     "type": "content",
                     "content": f"\n[Agent reached maximum auto-continue limit of {native_max_auto_continues}]"
                 }
-
         # If auto-continue is disabled (max=0), just run once
         if native_max_auto_continues == 0:
-            logger.info("Auto-continue is disabled (native_max_auto_continues=0)")
+            print("我现在是进到这里来了！！！！！！！！！！！！！")
+            print("Auto-continue is disabled (native_max_auto_continues=0)")
             # Pass the potentially modified system prompt and temp message
             return await _run_once(temporary_message)
 
         # Otherwise return the auto-continue wrapper generator
         return auto_continue_wrapper()
+

@@ -1,3 +1,15 @@
+"""
+custom_agents = True       是否启用自定义Agent功能
+mcp_module = True          是否启用MCP模块
+templates_api = True       是否启用模板API
+triggers_api = True        是否启用触发器API
+workflows_api = True       是否启用工作流API
+knowledge_base = True      是否启用知识库
+pipedream = True           是否启用Pipedream集成
+credentials_api = True     是否启用凭据API
+default_agent = True       是否启用默认Agent
+"""
+
 import json
 import logging
 import os
@@ -163,32 +175,34 @@ async def get_flag_details(key: str) -> Optional[Dict[str, str]]:
 
 # Feature Flags
 
+# Fufanmanus default agent feature flag
+fufanmanus_default_agent = True
+
 # Custom agents feature flag
-custom_agents = True
+custom_agents = False
 
 # MCP module feature flag  
-mcp_module = True
+mcp_module = False
 
 # Templates API feature flag
-templates_api = True
+templates_api = False
 
 # Triggers API feature flag
-triggers_api = True
+triggers_api = False
 
 # Workflows API feature flag
-workflows_api = True
+workflows_api = False
 
 # Knowledge base feature flag
-knowledge_base = True
+knowledge_base = False
 
 # Pipedream integration feature flag
-pipedream = True
+pipedream = False
 
 # Credentials API feature flag
-credentials_api = True
+credentials_api = False
 
-# Suna default agent feature flag
-suna_default_agent = True
+
 
 
 

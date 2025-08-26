@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException, Depends
 from typing import Optional, Dict
 from utils.auth_utils import verify_admin_api_key
-from utils.suna_default_agent_service import SunaDefaultAgentService
+from utils.fufanmanus_default_agent_service import SunaDefaultAgentService
 from utils.logger import logger
 from utils.config import config, EnvMode
 from dotenv import load_dotenv, set_key, find_dotenv, dotenv_values

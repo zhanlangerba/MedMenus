@@ -19,7 +19,16 @@ from utils.logger import logger
 from agentpress.tool import ToolResult
 from agentpress.tool_registry import ToolRegistry
 from agentpress.xml_tool_parser import XMLToolParser
-from langfuse.client import StatefulTraceClient
+try:
+    from langfuse.client import StatefulTraceClient
+except ImportError:
+    # 对于 langfuse 3.x 版本，尝试不同的导入路径
+    try:
+        from langfuse import StatefulTraceClient
+    except ImportError:
+        # 如果都失败，使用 Any 类型
+        from typing import Any
+        StatefulTraceClient = Any
 from services.langfuse import langfuse
 from utils.json_helpers import (
     ensure_dict, ensure_list, safe_json_parse, 
@@ -259,12 +268,24 @@ class ResponseProcessor:
                             has_printed_thinking_prefix = True
                         # print(delta.reasoning_content, end='', flush=True)
                         # Append reasoning to main content to be saved in the final message
-                        accumulated_content += delta.reasoning_content
+                        reasoning_content = delta.reasoning_content
+                        if isinstance(reasoning_content, list):
+                            reasoning_content = ' '.join(str(item) for item in reasoning_content)
+                        elif not isinstance(reasoning_content, str):
+                            reasoning_content = str(reasoning_content)
+                        accumulated_content += reasoning_content
 
                     # Process content chunk
                     if delta and hasattr(delta, 'content') and delta.content:
                         chunk_content = delta.content
                         # print(chunk_content, end='', flush=True)
+                        
+                        # 确保chunk_content是字符串
+                        if isinstance(chunk_content, list):
+                            chunk_content = ' '.join(str(item) for item in chunk_content)
+                        elif not isinstance(chunk_content, str):
+                            chunk_content = str(chunk_content)
+                        
                         accumulated_content += chunk_content
                         current_xml_content += chunk_content
 

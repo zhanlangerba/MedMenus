@@ -17,7 +17,7 @@ Usage:
 import os
 from enum import Enum
 from typing import Dict, Any, Optional, get_type_hints, Union
-from dotenv import load_dotenv
+from dotenv import load_dotenv # type: ignore
 import logging
 
 logger = logging.getLogger(__name__)
@@ -207,8 +207,8 @@ class Configuration:
     MORPH_API_KEY: Optional[str] = None
     GEMINI_API_KEY: Optional[str] = None
     OPENROUTER_API_BASE: Optional[str] = "https://openrouter.ai/api/v1"
-    OR_SITE_URL: Optional[str] = "https://kortix.ai"
-    OR_APP_NAME: Optional[str] = "Kortix AI"    
+    OR_SITE_URL: Optional[str] = "https://fufanmanus.com"
+    OR_APP_NAME: Optional[str] = "Fufanmanus"
     
     # AWS Bedrock credentials
     AWS_ACCESS_KEY_ID: Optional[str] = None
@@ -216,7 +216,7 @@ class Configuration:
     AWS_REGION_NAME: Optional[str] = None
     
     # Model configuration
-    MODEL_TO_USE: Optional[str] = "anthropic/claude-sonnet-4-20250514"
+    MODEL_TO_USE: Optional[str] = "deepseek/deepseek-chat-v3.1"
     
     # Supabase configuration (optional for simple auth testing)
     SUPABASE_URL: Optional[str] = None

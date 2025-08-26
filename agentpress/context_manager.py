@@ -9,7 +9,7 @@ import json
 from typing import List, Dict, Any, Optional, Union
 
 from litellm.utils import token_counter
-from services.supabase import DBConnection
+from services.postgresql import DBConnection
 from utils.logger import logger
 
 DEFAULT_TOKEN_THRESHOLD = 120000
