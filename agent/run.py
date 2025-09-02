@@ -6,6 +6,7 @@ from typing import Optional, Dict, List, Any, AsyncGenerator
 from dataclasses import dataclass
 import traceback
 
+
 from agent.tools.message_tool import MessageTool
 # from agent.tools.sb_deploy_tool import SandboxDeployTool
 # from agent.tools.sb_expose_tool import SandboxExposeTool
@@ -31,11 +32,11 @@ from utils.logger import logger
 # from agent.tools.sb_presentation_tool_v2 import SandboxPresentationToolV2
 from services.langfuse import langfuse
 try:
-    from langfuse.client import StatefulTraceClient
+    from langfuse.client import StatefulTraceClient # type: ignore
 except ImportError:
     # 对于 langfuse 3.x 版本，尝试不同的导入路径
     try:
-        from langfuse import StatefulTraceClient
+        from langfuse import StatefulTraceClient # type: ignore
     except ImportError:
         # 如果都失败，使用 Any 类型
         from typing import Any
@@ -55,16 +56,22 @@ class AgentConfig:
     thread_id: str
     project_id: str
     stream: bool
-    native_max_auto_continues: int = 25
+    native_max_auto_continues: int = 0
     max_iterations: int = 100
     model_name: str = "deepseek/deepseek-chat"
     enable_thinking: Optional[bool] = False
     reasoning_effort: Optional[str] = 'low'
     enable_context_manager: bool = True
     agent_config: Optional[dict] = None
-    trace: Optional[StatefulTraceClient] = None
+    trace: Optional[StatefulTraceClient] = None # type: ignore
     is_agent_builder: Optional[bool] = False
     target_agent_id: Optional[str] = None
+    # ADK相关字段
+    user_id: Optional[str] = None
+    agent_run_id: Optional[str] = None
+    user_message: Optional[str] = None
+    prompt: Optional[str] = None
+    use_adk: bool = True  # 是否使用ADK，默认启用
 
 
 # class ToolManager:
@@ -256,11 +263,11 @@ class PromptManager:
         else:
             default_system_content = get_system_prompt()
         
-        if "anthropic" not in model_name.lower():
-            sample_response_path = os.path.join(os.path.dirname(__file__), 'sample_responses/1.txt')
-            with open(sample_response_path, 'r') as file:
-                sample_response = file.read()
-            default_system_content = default_system_content + "\n\n <sample_assistant_response>" + sample_response + "</sample_assistant_response>"
+        # if "anthropic" not in model_name.lower():
+        #     sample_response_path = os.path.join(os.path.dirname(__file__), 'sample_responses/1.txt')
+        #     with open(sample_response_path, 'r') as file:
+        #         sample_response = file.read()
+        #     default_system_content = default_system_content + "\n\n <sample_assistant_response>" + sample_response + "</sample_assistant_response>"
         
         # if is_agent_builder:
         #     system_content = get_agent_builder_prompt()
@@ -329,35 +336,71 @@ class PromptManager:
 
 
 class MessageManager:
-    def __init__(self, client, thread_id: str, model_name: str, trace: Optional[StatefulTraceClient]):
+    """
+    消息管理器类
+    
+    负责构建临时消息，包括浏览器状态和图像上下文信息。
+    这些临时消息会在AI处理用户请求时作为上下文信息提供给模型。
+    """
+    
+    def __init__(self, client, thread_id: str, model_name: str, trace: Optional[StatefulTraceClient]): # type: ignore
+        """
+        初始化消息管理器
+        
+        Args:
+            client: 数据库客户端，用于查询消息表
+            thread_id: 线程ID，用于标识特定的对话线程
+            model_name: 模型名称，用于判断是否支持图像处理
+            trace: 追踪客户端，用于日志记录
+        """
         self.client = client
         self.thread_id = thread_id
         self.model_name = model_name
         self.trace = trace
     
     async def build_temporary_message(self) -> Optional[dict]:
-        temp_message_content_list = []
+        """
+        构建临时消息
+        
+        这个方法会：
+        1. 获取最新的浏览器状态信息（包括截图）
+        2. 获取最新的图像上下文信息
+        3. 将这些信息组合成一个临时消息，供AI模型使用
+        
+        Returns:
+            Optional[dict]: 包含浏览器状态和图像信息的临时消息，如果没有相关信息则返回None
+        """
+        temp_message_content_list = []  # 存储临时消息的内容列表
 
+        # 获取最新的浏览器状态消息
         latest_browser_state_msg = await self.client.table('messages').select('*').eq('thread_id', self.thread_id).eq('type', 'browser_state').order('created_at', desc=True).limit(1).execute()
+        
         if latest_browser_state_msg.data and len(latest_browser_state_msg.data) > 0:
             try:
+                # 解析浏览器状态内容
                 browser_content = latest_browser_state_msg.data[0]["content"]
                 if isinstance(browser_content, str):
                     browser_content = json.loads(browser_content)
-                screenshot_base64 = browser_content.get("screenshot_base64")
-                screenshot_url = browser_content.get("image_url")
                 
+                # 提取截图信息
+                screenshot_base64 = browser_content.get("screenshot_base64")  # Base64编码的截图
+                screenshot_url = browser_content.get("image_url")  # 截图的URL地址
+                
+                # 复制浏览器状态文本，移除截图相关字段
                 browser_state_text = browser_content.copy()
                 browser_state_text.pop('screenshot_base64', None)
                 browser_state_text.pop('image_url', None)
 
+                # 如果有浏览器状态文本信息，添加到临时消息中
                 if browser_state_text:
                     temp_message_content_list.append({
                         "type": "text",
                         "text": f"The following is the current state of the browser:\n{json.dumps(browser_state_text, indent=2)}"
                     })
                 
+                # 检查模型是否支持图像处理（Gemini、Anthropic、OpenAI）
                 if 'gemini' in self.model_name.lower() or 'anthropic' in self.model_name.lower() or 'openai' in self.model_name.lower():
+                    # 优先使用URL，如果没有则使用Base64
                     if screenshot_url:
                         temp_message_content_list.append({
                             "type": "image_url",
@@ -377,19 +420,27 @@ class MessageManager:
             except Exception as e:
                 logger.error(f"Error parsing browser state: {e}")
 
+        # 获取最新的图像上下文消息
         latest_image_context_msg = await self.client.table('messages').select('*').eq('thread_id', self.thread_id).eq('type', 'image_context').order('created_at', desc=True).limit(1).execute()
+        
         if latest_image_context_msg.data and len(latest_image_context_msg.data) > 0:
             try:
+                # 解析图像上下文内容
                 image_context_content = latest_image_context_msg.data[0]["content"] if isinstance(latest_image_context_msg.data[0]["content"], dict) else json.loads(latest_image_context_msg.data[0]["content"])
-                base64_image = image_context_content.get("base64")
-                mime_type = image_context_content.get("mime_type")
-                file_path = image_context_content.get("file_path", "unknown file")
+                
+                # 提取图像信息
+                base64_image = image_context_content.get("base64")  # Base64编码的图像
+                mime_type = image_context_content.get("mime_type")  # 图像的MIME类型
+                file_path = image_context_content.get("file_path", "unknown file")  # 图像文件路径
 
+                # 如果有图像数据，添加到临时消息中
                 if base64_image and mime_type:
+                    # 添加图像描述文本
                     temp_message_content_list.append({
                         "type": "text",
                         "text": f"Here is the image you requested to see: '{file_path}'"
                     })
+                    # 添加图像URL
                     temp_message_content_list.append({
                         "type": "image_url",
                         "image_url": {
@@ -397,77 +448,107 @@ class MessageManager:
                         }
                     })
 
+                # 处理完图像上下文后，删除该消息（避免重复使用）
                 await self.client.table('messages').delete().eq('message_id', latest_image_context_msg.data[0]["message_id"]).execute()
+                
             except Exception as e:
                 logger.error(f"Error parsing image context: {e}")
 
+        # 如果有临时消息内容，返回格式化的消息
         if temp_message_content_list:
             return {"role": "user", "content": temp_message_content_list}
         return None
 
+
+
+ADK_AVAILABLE = True
 
 class AgentRunner:
     def __init__(self, config: AgentConfig):
         self.config = config
     
     async def setup(self):
-        print(f"🔵 ===== AgentRunner.setup()开始执行 =====")
         try:
-            print(f"  🔄 检查trace配置...")
             if not self.config.trace:
-                print(f"    📡 创建Langfuse trace...")
                 self.config.trace = langfuse.trace(name="run_agent", session_id=self.config.thread_id, metadata={"project_id": self.config.project_id})
-                print(f"    ✅ Langfuse trace创建成功")
+                logger.info(f"Langfuse trace created successfully")
             else:
-                print(f"    ✅ 使用现有trace")
-            
-            print(f"  🔄 创建ThreadManager...")
-            self.thread_manager = ThreadManager(
-                trace=self.config.trace, 
-                is_agent_builder=self.config.is_agent_builder or False, 
-                target_agent_id=self.config.target_agent_id, 
-                agent_config=self.config.agent_config
-            )
-            print(f"  ✅ ThreadManager创建成功")
-            
-            print(f"  🔄 获取数据库客户端...")
+                logger.info(f"Using existing trace")
+     
+            # 使用 Google ADK 框架承接服务
+            self.thread_manager = ADKThreadManager(
+                        trace=self.config.trace, 
+                        is_agent_builder=self.config.is_agent_builder or False, 
+                        target_agent_id=self.config.target_agent_id, 
+                        agent_config=self.config.agent_config
+                    )
+            logger.info(f"ADKThreadManager created successfully")
+
+            # 初始化数据库客户端
             self.client = await self.thread_manager.db.client
-            print(f"  ✅ 数据库客户端获取成功: {self.client}")
+            logger.info(f"Database client initialized successfully")
+
+            # 获取账户ID
+            from utils.auth_utils import AuthUtils
+            self.account_id = await AuthUtils.get_account_id_from_thread(self.client, self.config.thread_id)
+            if not self.account_id: 
+                raise ValueError("Could not determine account ID for thread")
+
+            # 获取项目信息
+            project = await self.client.table('projects').select('*').eq('project_id', self.config.project_id).execute()
+            if not project.data or len(project.data) == 0:
+                raise ValueError(f"Project {self.config.project_id} not found")
+
+            project_data = project.data[0]
+            sandbox_info = project_data.get('sandbox', {})
+
+            # 处理 sandbox_info 可能是字符串的情况
+            if isinstance(sandbox_info, str):
+                try:
+                    import json
+                    sandbox_info = json.loads(sandbox_info)
+                except (json.JSONDecodeError, TypeError):
+                    sandbox_info = {}
+
+            if not sandbox_info.get('id'):
+                # Sandbox is created lazily by tools when required. Do not fail setup
+                # if no sandbox is present — tools will call `_ensure_sandbox()`
+                # which will create and persist the sandbox metadata when needed.
+                logger.info(f"No sandbox found for project {self.config.project_id}; will create lazily when needed")
             
-            print(f"  ✅ setup()完成")
+            logger.info(f"setup() completed")
         except Exception as setup_error:
-            print(f"  ❌ setup()失败: {setup_error}")
-            print(f"  📋 错误详情: {traceback.format_exc()}")
+            logger.error(f"Error details: {traceback.format_exc()}")
             raise setup_error
-    
-    async def setup_tools(self):
-        tool_manager = ToolManager(self.thread_manager, self.config.project_id, self.config.thread_id)
         
-        if self.config.agent_config and self.config.agent_config.get('is_suna_default', False):
-            suna_agent_id = self.config.agent_config['agent_id']
-            tool_manager.register_agent_builder_tools(suna_agent_id)
+    # async def setup_tools(self):
+    #     tool_manager = ToolManager(self.thread_manager, self.config.project_id, self.config.thread_id)
         
-        if self.config.is_agent_builder:
-            tool_manager.register_agent_builder_tools(self.config.target_agent_id)
+    #     if self.config.agent_config and self.config.agent_config.get('is_suna_default', False):
+    #         suna_agent_id = self.config.agent_config['agent_id']
+    #         tool_manager.register_agent_builder_tools(suna_agent_id)
+        
+    #     if self.config.is_agent_builder:
+    #         tool_manager.register_agent_builder_tools(self.config.target_agent_id)
 
-        enabled_tools = None
-        if self.config.agent_config and 'agentpress_tools' in self.config.agent_config:
-            raw_tools = self.config.agent_config['agentpress_tools']
+    #     enabled_tools = None
+    #     if self.config.agent_config and 'agentpress_tools' in self.config.agent_config:
+    #         raw_tools = self.config.agent_config['agentpress_tools']
             
-            if isinstance(raw_tools, dict):
-                if self.config.agent_config.get('is_suna_default', False) and not raw_tools:
-                    enabled_tools = None
-                else:
-                    enabled_tools = raw_tools
-            else:
-                enabled_tools = None
+    #         if isinstance(raw_tools, dict):
+    #             if self.config.agent_config.get('is_suna_default', False) and not raw_tools:
+    #                 enabled_tools = None
+    #             else:
+    #                 enabled_tools = raw_tools
+    #         else:
+    #             enabled_tools = None
 
-        if enabled_tools is None:
-            tool_manager.register_all_tools()
-        else:
-            if not isinstance(enabled_tools, dict):
-                enabled_tools = {}
-            tool_manager.register_custom_tools(enabled_tools)
+    #     if enabled_tools is None:
+    #         tool_manager.register_all_tools()
+    #     else:
+    #         if not isinstance(enabled_tools, dict):
+    #             enabled_tools = {}
+    #         tool_manager.register_custom_tools(enabled_tools)
     
     # async def setup_mcp_tools(self) -> Optional[MCPToolWrapper]:
     #     if not self.config.agent_config:
@@ -476,101 +557,81 @@ class AgentRunner:
     #     mcp_manager = MCPManager(self.thread_manager, self.account_id)
     #     return await mcp_manager.register_mcp_tools(self.config.agent_config)
     
-    def get_max_tokens(self) -> Optional[int]:
-        if "sonnet" in self.config.model_name.lower():
-            return 8192
-        elif "gpt-4" in self.config.model_name.lower():
-            return 4096
-        elif "gemini-2.5-pro" in self.config.model_name.lower():
-            return 64000
-        elif "kimi-k2" in self.config.model_name.lower():
-            return 8192
-        return None
+    # def get_max_tokens(self) -> Optional[int]:
+    #     if "sonnet" in self.config.model_name.lower():
+    #         return 8192
+    #     elif "gpt-4" in self.config.model_name.lower():
+    #         return 4096
+    #     elif "gemini-2.5-pro" in self.config.model_name.lower():
+    #         return 64000
+    #     elif "kimi-k2" in self.config.model_name.lower():
+    #         return 8192
+    #     return None
+    
     
     async def run(self) -> AsyncGenerator[Dict[str, Any], None]:
-        print(f"🔵 ===== AgentRunner.run()开始执行 =====")
-        try:
-            print(f"  🔄 调用setup()...")
-            await self.setup()
-            print(f"  ✅ setup()完成")
-        except Exception as setup_error:
-            print(f"  ❌ setup()失败: {setup_error}")
-            print(f"  📋 错误详情: {traceback.format_exc()}")
-            raise setup_error
-        
+        await self.setup()
+        logger.info(f"setup() completed")
         # await self.setup_tools()
         # mcp_wrapper_instance = await self.setup_mcp_tools()
         
-        try:
-            print(f"  🔄 调用PromptManager.build_system_prompt()...")
-            system_message = await PromptManager.build_system_prompt(
-                self.config.model_name, self.config.agent_config, 
-                self.config.is_agent_builder, self.config.thread_id, 
-                # mcp_wrapper_instance
-            )
-            print(f"  ✅ build_system_prompt()完成")
-        except Exception as prompt_error:
-            print(f"  ❌ build_system_prompt()失败: {prompt_error}")
-            print(f"  📋 错误详情: {traceback.format_exc()}")
-            raise prompt_error
+        # system_message = await PromptManager.build_system_prompt(
+        #     self.config.model_name, self.config.agent_config, 
+        #     self.config.is_agent_builder, self.config.thread_id, 
+        #     mcp_wrapper_instance
+        # )
 
+        system_message = await PromptManager.build_system_prompt(
+            self.config.model_name, self.config.agent_config, 
+            self.config.is_agent_builder, self.config.thread_id, 
+        )
+        logger.info(f"system_message created successfully")
+
+        # 初始化迭代次数
         iteration_count = 0
+
+        # 初始化继续执行标志
         continue_execution = True
 
-        # 源码
-        # latest_user_message = await self.client.table('messages').select('*').eq('thread_id', self.config.thread_id).eq('type', 'user').order('created_at', desc=True).limit(1).execute()
-        # print(f"latest_user_message: {latest_user_message}")
-        # if latest_user_message.data and len(latest_user_message.data) > 0:
-        #     data = latest_user_message.data[0]['content']
-        #     if isinstance(data, str):
-        #         data = json.loads(data)
-        #     if self.config.trace:
-        #         self.config.trace.update(input=data['content'])
+        # 获取最新消息 - 统一从events表获取
+        latest_user_message = await self.client.table('events').select('*').eq('session_id', self.config.thread_id).order('timestamp', desc=True).limit(10).execute()
+        logger.info(f"Event table query result: {len(latest_user_message.data) if latest_user_message.data else 0}")
 
-        print(f"  🔄 从events表获取最新用户输入...")
-        try:
-            # 从events表获取最新的用户输入
-            latest_event = await self.client.table('events').select('*').eq('session_id', self.config.thread_id).eq('author', 'user').order('timestamp', desc=True).limit(1).execute()
-            print(f"  ✅ events查询结果: {latest_event}")
+        # 提取用户请求内容
+        user_request = None
+        if latest_user_message.data and len(latest_user_message.data) > 0:
+            logger.info(f"Latest 10 messages author list: {[msg.get('author') for msg in latest_user_message.data]}")
             
-            if latest_event.data and len(latest_event.data) > 0:
-                event_data = latest_event.data[0]
-                content = event_data.get('content', {})
-                print(f"  📝 找到用户事件: {event_data.get('id')}")
-                
-                if isinstance(content, str):
-                    try:
-                        content = json.loads(content)
-                    except json.JSONDecodeError:
-                        print(f"  ⚠️ 事件内容不是有效的JSON: {content}")
-                        content = {"content": content}
-                
-                # 提取用户输入内容
-                user_input = None
-                if isinstance(content, dict):
-                    user_input = content.get('content', '')
-                    print(f"  💬 用户输入: {user_input}")
-                
-                # 更新trace
-                if self.config.trace and user_input:
-                    try:
-                        self.config.trace.update(input=user_input)
-                        print(f"  ✅ Trace更新成功")
-                    except Exception as trace_error:
-                        print(f"  ⚠️ Trace更新失败: {trace_error}")
-            else:
-                print(f"  ℹ️ 没有找到用户事件")
-                
-        except Exception as event_error:
-            print(f"  ❌ 获取用户事件失败: {event_error}")
-            print(f"  📋 错误详情: {traceback.format_exc()}")
-            # 继续执行，不中断流程
+            # 找到最新的用户消息
+            for i, event in enumerate(latest_user_message.data):
+                if event.get('author') == 'user':
+                    content = event.get('content', {})
+                    timestamp = event.get('timestamp')
+                    logger.info(f"Found user message[{i}]: timestamp={timestamp}")
+                    
+                    # 解析content字段
+                    if isinstance(content, str):
+                        try:
+                            content = json.loads(content)
+                        except json.JSONDecodeError:
+                            content = {"content": content}
+                    
+                    # 提取用户请求
+                    if isinstance(content, dict):
+                        user_request = content.get('content', '')
+                        logger.info(f"Extracted user request: {user_request}")
+                    break
+            
+            if self.config.trace and user_request:
+                self.config.trace.update(input=user_request)
 
         message_manager = MessageManager(self.client, self.config.thread_id, self.config.model_name, self.config.trace)
 
+        # 进入循环执行
         while continue_execution and iteration_count < self.config.max_iterations:
-            iteration_count += 1
-
+            iteration_count += 1          
+            logger.info(f"Looping：continue_execution={continue_execution}, iteration_count={iteration_count}, max_iterations={self.config.max_iterations}")
+            
             # can_run, message, subscription = await check_billing_status(self.client, self.account_id)
             # if not can_run:
             #     error_msg = f"Billing limit reached: {message}"
@@ -581,79 +642,59 @@ class AgentRunner:
             #     }
             #     break
 
-            # 源码
-            # latest_message = await self.client.table('messages').select('*').eq('thread_id', self.config.thread_id).in_('type', ['assistant', 'tool', 'user']).order('created_at', desc=True).limit(1).execute()
-            # if latest_message.data and len(latest_message.data) > 0:
-            #     message_type = latest_message.data[0].get('type')
-            #     if message_type == 'assistant':
-            #         continue_execution = False
-            #         break
-
-            # 检查最新的消息类型（assistant, tool, user）
-            latest_event = await self.client.table('events').select('*').eq('session_id', self.config.thread_id).in_('author', ['assistant', 'tool', 'user']).order('timestamp', desc=True).limit(1).execute()
-            if latest_event.data and len(latest_event.data) > 0:
-                author_type = latest_event.data[0].get('author')
-                print(f"  📝 最新消息类型: {author_type}")
-                if author_type == 'assistant':
-                    print(f"  ℹ️ 检测到最新消息是assistant，停止执行")
+            # 检查最新消息类型 - 在循环中重新查询，因为可能有新数据
+            logger.info(f"🔍 查询最新消息以检查是否应该继续执行...")
+            latest_message = await self.client.table('events').select('*').eq('session_id', self.config.thread_id).in_('author', ['assistant', 'tool', 'user']).order('timestamp', desc=True).limit(1).execute()
+            
+            if latest_message.data and len(latest_message.data) > 0:
+                message_author = latest_message.data[0].get('author')
+                message_timestamp = latest_message.data[0].get('timestamp')
+                message_content = latest_message.data[0].get('content', {})
+                logger.info(f"🔍 最新消息: author={message_author}, timestamp={message_timestamp}")
+                logger.info(f"🔍 消息内容预览: {str(message_content)[:100]}...")
+                
+                if message_author == 'assistant':
+                    logger.info(f"🛑 检测到assistant消息，设置continue_execution=False")
                     continue_execution = False
                     break
-
-            # 构建临时消息 - 修复：传递处理后的消息对象而不是QueryResult
-            temporary_message = None
-            if latest_event.data and len(latest_event.data) > 0:
-                event_data = latest_event.data[0]
-                # 确保event_data是字典格式
-                if hasattr(event_data, '__dict__'):
-                    event_data = dict(event_data)
-                
-                content = event_data.get('content', {})
-                if isinstance(content, str):
-                    try:
-                        content = json.loads(content)
-                    except json.JSONDecodeError:
-                        content = {"content": content}
-                
-                # 构建临时消息对象
-                if isinstance(content, dict) and 'content' in content:
-                    temporary_message = {
-                        "role": "user",
-                        "content": content['content']
-                    }
-                    print(f"  📝 构建临时消息: {temporary_message}")
                 else:
-                    print(f"  ⚠️ 无法从事件数据构建临时消息")
+                    logger.info(f"🔄 最新消息不是assistant，继续执行")
             else:
-                print(f"  ℹ️ 没有找到最新事件，不传递临时消息")
+                logger.info(f"⚠️ 未找到任何消息，这可能是问题所在")
+
+            temporary_message = await message_manager.build_temporary_message()
+            # max_tokens = self.get_max_tokens()
             
             generation = self.config.trace.generation(name="thread_manager.run_thread") if self.config.trace else None
+            print("====我现在要开始执行run_thread方法了====")
             try:
-                response = await self.thread_manager.run_thread(
-                    thread_id=self.config.thread_id,
-                    system_prompt=system_message,
-                    stream=self.config.stream,
-                    llm_model=self.config.model_name,
-                    llm_temperature=0,
-                    llm_max_tokens=1024,
-                    tool_choice="auto",
-                    max_xml_tool_calls=1,
-                    temporary_message=temporary_message,
-                    processor_config=ProcessorConfig(
-                        xml_tool_calling=True,
-                        native_tool_calling=False,
-                        execute_tools=True,
-                        execute_on_stream=True,
-                        tool_execution_strategy="parallel",
-                        xml_adding_strategy="user_message"
-                    ),
-                    native_max_auto_continues=self.config.native_max_auto_continues,
-                    include_xml_examples=True,
-                    enable_thinking=self.config.enable_thinking,
-                    reasoning_effort=self.config.reasoning_effort,
-                    enable_context_manager=self.config.enable_context_manager,
-                    generation=generation
-                )
-
+                response = await self.thread_manager.run_thread( 
+                        thread_id=self.config.thread_id,
+                        system_prompt=system_message,
+                        stream=self.config.stream,
+                        llm_model=self.config.model_name,
+                        llm_temperature=0,
+                        # llm_max_tokens=max_tokens,
+                        llm_max_tokens=1024,
+                        tool_choice="auto",
+                        max_xml_tool_calls=1,
+                        temporary_message=temporary_message,
+                        processor_config=ProcessorConfig(
+                            xml_tool_calling=True,
+                            native_tool_calling=False,
+                            execute_tools=True,
+                            execute_on_stream=True,
+                            tool_execution_strategy="parallel",
+                            xml_adding_strategy="user_message"
+                        ),
+                        native_max_auto_continues=self.config.native_max_auto_continues,
+                        include_xml_examples=True,
+                        enable_thinking=self.config.enable_thinking,
+                        reasoning_effort=self.config.reasoning_effort,
+                        enable_context_manager=self.config.enable_context_manager,
+                        generation=generation
+                    )
+   
                 if isinstance(response, dict) and "status" in response and response["status"] == "error":
                     yield response
                     break
@@ -662,11 +703,20 @@ class AgentRunner:
                 agent_should_terminate = False
                 error_detected = False
                 full_response = ""
-                print(f"  📝 full_response初始化: 类型={type(full_response)}, 内容='{full_response}'")
+                final_response_text = None  # ✅ 用于存储is_final_response的内容
+                adk_call_completed = False  # ✅ 标记单次ADK调用是否完成
 
                 try:
                     if hasattr(response, '__aiter__') and not isinstance(response, dict):
                         async for chunk in response:
+                            print(f"🔍 收到ADK事件: {chunk}")
+                            
+                            # ✅ 官方推荐：用is_final_response()获取最终可展示文本
+                            if hasattr(chunk, 'is_final_response') and chunk.is_final_response():
+                                if hasattr(chunk, 'content') and chunk.content and hasattr(chunk.content, 'parts') and chunk.content.parts:
+                                    final_response_text = chunk.content.parts[0].text
+                                    logger.info(f"🎯 检测到final_response: {final_response_text[:100]}...")
+                            
                             if isinstance(chunk, dict) and chunk.get('type') == 'status' and chunk.get('status') == 'error':
                                 error_detected = True
                                 yield chunk
@@ -695,51 +745,14 @@ class AgentRunner:
                             
                             if chunk.get('type') == 'assistant' and 'content' in chunk:
                                 try:
-                                    print(f"  🔍 处理assistant chunk:")
-                                    print(f"    📋 chunk类型: {type(chunk)}")
-                                    print(f"    📝 chunk内容: {chunk}")
-                                    
                                     content = chunk.get('content', '{}')
-                                    print(f"    📄 content类型: {type(content)}")
-                                    print(f"    📄 content内容: {content}")
-                                    
                                     if isinstance(content, str):
                                         assistant_content_json = json.loads(content)
                                     else:
                                         assistant_content_json = content
-                                    
-                                    print(f"    📋 assistant_content_json类型: {type(assistant_content_json)}")
-                                    print(f"    📋 assistant_content_json内容: {assistant_content_json}")
 
                                     assistant_text = assistant_content_json.get('content', '')
-                                    print(f"    📝 assistant_text原始类型: {type(assistant_text)}")
-                                    print(f"    📝 assistant_text原始内容: {assistant_text}")
-                                    
-                                    # 确保assistant_text是字符串
-                                    if isinstance(assistant_text, list):
-                                        print(f"    ⚠️ assistant_text是列表，开始处理...")
-                                        # 如果是列表，尝试提取文本内容
-                                        text_parts = []
-                                        for i, item in enumerate(assistant_text):
-                                            print(f"      [{i}] item类型: {type(item)}, 内容: {item}")
-                                            if isinstance(item, dict) and 'text' in item:
-                                                text_parts.append(item['text'])
-                                            elif isinstance(item, str):
-                                                text_parts.append(item)
-                                        assistant_text = ' '.join(text_parts)
-                                        print(f"    ✅ 列表处理后: {assistant_text}")
-                                    elif not isinstance(assistant_text, str):
-                                        print(f"    ⚠️ assistant_text不是字符串，转换为字符串")
-                                        assistant_text = str(assistant_text)
-                                        print(f"    ✅ 转换后: {assistant_text}")
-                                    
-                                    print(f"    📝 最终assistant_text类型: {type(assistant_text)}")
-                                    print(f"    📝 最终assistant_text内容: {assistant_text}")
-                                    print(f"    📝 full_response当前类型: {type(full_response)}")
-                                    print(f"    📝 full_response当前内容: {full_response}")
-                                    
                                     full_response += assistant_text
-                                    print(f"    ✅ 拼接完成，full_response长度: {len(full_response)}")
                                     if isinstance(assistant_text, str):
                                         if '</ask>' in assistant_text or '</complete>' in assistant_text or '</web-browser-takeover>' in assistant_text:
                                            if '</ask>' in assistant_text:
@@ -757,18 +770,39 @@ class AgentRunner:
                                     pass
 
                             yield chunk
+                        
+                        # ✅ 当async for循环结束时，说明这次ADK调用的事件流已耗尽
+                        adk_call_completed = True
+                        logger.info(f"🏁 ADK事件流耗尽，单次调用完成")
+                        
                     else:
                         error_detected = True
 
                     if error_detected:
+                        logger.info(f"🚨 检测到错误，终止执行")
                         if generation:
                             generation.end(output=full_response, status_message="error_detected", level="ERROR")
                         break
                         
+                    # ✅ 基于官方建议的外层循环终止判断
                     if agent_should_terminate or last_tool_call in ['ask', 'complete', 'web-browser-takeover']:
+                        logger.info(f"🛑 Agent明确终止: agent_should_terminate={agent_should_terminate}, last_tool_call={last_tool_call}")
                         if generation:
                             generation.end(output=full_response, status_message="agent_stopped")
                         continue_execution = False
+                        logger.info(f"🛑 设置continue_execution=False，应该退出循环")
+                    elif adk_call_completed and final_response_text:
+                        # ✅ ADK调用完成且有最终响应文本，通常表示一轮完整对话结束
+                        logger.info(f"✅ ADK调用完成且有最终响应，默认终止外层循环")
+                        logger.info(f"📝 最终响应预览: {final_response_text[:200]}...")
+                        continue_execution = False
+                    elif adk_call_completed and not final_response_text:
+                        # ✅ ADK调用完成但没有最终响应文本，可能需要继续
+                        logger.info(f"⚠️ ADK调用完成但无最终响应文本，继续下一次迭代")
+                        # continue_execution保持True，继续下一次迭代
+                    else:
+                        # ✅ 其他情况，可能是ADK内部错误或异常状态
+                        logger.info(f"❓ 未明确的ADK状态 (completed={adk_call_completed}, final_text={bool(final_response_text)})，继续尝试")
 
                 except Exception as e:
                     error_msg = f"Error during response streaming: {str(e)}"
@@ -793,49 +827,244 @@ class AgentRunner:
             if generation:
                 generation.end(output=full_response)
 
+        # 🔍 循环结束日志
+        logger.info(f"🏁 Agent执行循环结束: continue_execution={continue_execution}, iteration_count={iteration_count}")
+        logger.info(f"🏁 最终状态: max_iterations={self.config.max_iterations}")
+
         asyncio.create_task(asyncio.to_thread(lambda: langfuse.flush()))
+
+
+    # async def run(self) -> AsyncGenerator[Dict[str, Any], None]:
+        # """运行Agent，支持ADK和ThreadManager两种模式"""
+        # print(f"🚀 ===== AgentRunner.run()开始执行 =====")
+        # try:
+        #     # 检查使用哪种模式
+        #     if self.adk_runner and self.adk_session:
+        #         print(f"  🔄 使用ADK模式执行...")
+        #         async for event in self._run_with_adk():
+        #             yield event
+        #     elif self.thread_manager:
+        #         print(f"  🔄 使用ThreadManager模式执行...")
+        #         async for event in self._run_with_thread_manager():
+        #             yield event
+        #     else:
+        #         raise RuntimeError("Neither ADK Runner nor ThreadManager initialized. Call setup() first.")
+            
+        #     print(f"  ✅ AgentRunner.run()执行完成")
+            
+        # except Exception as run_error:
+        #     print(f"  ❌ AgentRunner.run()执行失败: {run_error}")
+        #     print(f"  📋 错误详情: {traceback.format_exc()}")
+        #     # 返回错误事件
+        #     yield {
+        #         "type": "error",
+        #         "content": f"Agent execution failed: {str(run_error)}",
+        #         "metadata": {"error": str(run_error)}
+        #     }
+    
+    async def _run_with_adk(self) -> AsyncGenerator[Dict[str, Any], None]:
+        """使用ADK Runner执行"""
+        try:
+            print(f"  📝 准备用户输入...")
+            # 准备用户输入内容
+            user_content = types.Content(
+                role='user',
+                parts=[types.Part.from_text(text=self.config.user_message or "Hello")]
+            )
+            print(f"  ✅ 用户输入准备完成")
+            
+            print(f"  🔄 开始ADK Runner执行...")
+            # 使用ADK Runner执行
+            async for event in self.adk_runner.run_async(
+                user_id=self.adk_session.user_id,
+                content=user_content,
+                session_id=self.adk_session.id
+            ):
+                print(f"  📨 收到ADK事件: {event.type}")
+                
+                # 将ADK事件转换为你的格式
+                converted_event = self._convert_adk_event_to_format(event)
+                if converted_event:
+                    yield converted_event
+                
+                # 检查是否完成
+                if event.type == "assistant_response_end":
+                    print(f"  ✅ ADK执行完成")
+                    break
+                    
+        except Exception as adk_error:
+            print(f"  ❌ ADK执行失败: {adk_error}")
+            yield {
+                "type": "error",
+                "content": f"ADK execution failed: {str(adk_error)}",
+                "metadata": {"error": str(adk_error)}
+            }
+    
+    async def _run_with_thread_manager(self) -> AsyncGenerator[Dict[str, Any], None]:
+        """使用ThreadManager执行（回退模式）"""
+        try:
+            print(f"  📝 准备ThreadManager执行...")
+            
+            # 构建临时消息
+            temporary_message = None
+            if self.client:
+                try:
+                    message_manager = MessageManager(
+                        self.client, 
+                        self.config.thread_id, 
+                        self.config.model_name, 
+                        self.config.trace
+                    )
+                    temporary_message = await message_manager.build_temporary_message()
+                    if temporary_message:
+                        print(f"  ✅ 临时消息构建成功")
+                    else:
+                        print(f"  ℹ️ 没有临时消息")
+                except Exception as msg_error:
+                    print(f"  ⚠️ 构建临时消息失败: {msg_error}")
+                    temporary_message = None
+            
+            # 构建系统提示
+            system_prompt = PromptManager.build_system_prompt(
+                model_name=self.config.model_name,
+                agent_config=self.config.agent_config,
+                is_agent_builder=self.config.is_agent_builder or False,
+                thread_id=self.config.thread_id
+            )
+            
+            # 使用原有的ThreadManager逻辑
+            response = await self.thread_manager.run_thread(
+                thread_id=self.config.thread_id,
+                system_prompt=system_prompt,
+                stream=self.config.stream,
+                temporary_message=temporary_message,
+                llm_model=self.config.model_name,
+                enable_thinking=self.config.enable_thinking,
+                reasoning_effort=self.config.reasoning_effort,
+                enable_context_manager=self.config.enable_context_manager
+            )
+            
+            # 处理响应
+            if response:
+                yield {
+                    "type": "assistant",
+                    "content": {"role": "assistant", "content": str(response)},
+                    "metadata": {"thread_run_id": self.config.agent_run_id}
+                }
+            
+            print(f"  ✅ ThreadManager执行完成")
+            
+        except Exception as tm_error:
+            print(f"  ❌ ThreadManager执行失败: {tm_error}")
+            yield {
+                "type": "error",
+                "content": f"ThreadManager execution failed: {str(tm_error)}",
+                "metadata": {"error": str(tm_error)}
+            }
+    
+    def _convert_adk_event_to_format(self, adk_event) -> Optional[Dict[str, Any]]:
+        """将ADK事件转换为你的格式"""
+        try:
+            if adk_event.type == "assistant_response_start":
+                return {
+                    "type": "status",
+                    "content": {"status_type": "assistant_response_start"},
+                    "metadata": {"thread_run_id": self.config.agent_run_id}
+                }
+            
+            elif adk_event.type == "assistant_response":
+                # 处理助手响应
+                content = adk_event.content
+                if content and hasattr(content, 'parts'):
+                    text_content = ""
+                    for part in content.parts:
+                        if hasattr(part, 'text'):
+                            text_content += part.text
+                    
+                    return {
+                        "type": "assistant",
+                        "content": {"role": "assistant", "content": text_content},
+                        "metadata": {"stream_status": "chunk", "thread_run_id": self.config.agent_run_id}
+                    }
+            
+            elif adk_event.type == "tool_started":
+                # 处理工具调用
+                return {
+                    "type": "status",
+                    "content": {
+                        "role": "assistant",
+                        "status_type": "tool_started",
+                        "tool_name": adk_event.tool_name,
+                        "tool_args": adk_event.tool_args
+                    },
+                    "metadata": {"thread_run_id": self.config.agent_run_id}
+                }
+            
+            elif adk_event.type == "tool_result":
+                # 处理工具结果
+                return {
+                    "type": "tool",
+                    "content": {
+                        "role": "tool",
+                        "tool_name": adk_event.tool_name,
+                        "result": adk_event.result
+                    },
+                    "metadata": {"thread_run_id": self.config.agent_run_id}
+                }
+            
+            elif adk_event.type == "assistant_response_end":
+                # 处理响应结束
+                return {
+                    "type": "status",
+                    "content": {"status_type": "assistant_response_end"},
+                    "metadata": {"thread_run_id": self.config.agent_run_id}
+                }
+            
+            return None
+            
+        except Exception as convert_error:
+            print(f"  ⚠️ 事件转换失败: {convert_error}")
+            return None
+
+from agentpress.adk_thread_manager import ADKThreadManager
+from typing import  Union
 
 
 async def run_agent(
     thread_id: str,
     project_id: str,
     stream: bool,
-    thread_manager: Optional[ThreadManager] = None,
-    native_max_auto_continues: int = 25,
+    thread_manager: Optional[Union[ThreadManager, ADKThreadManager]] = None,  
+    native_max_auto_continues: int = 0,
     max_iterations: int = 100,
     model_name: str = "deepseek/deepseek-chat",
     enable_thinking: Optional[bool] = False,
     reasoning_effort: Optional[str] = 'low',
     enable_context_manager: bool = True,
     agent_config: Optional[dict] = None,    
-    trace: Optional[StatefulTraceClient] = None,
+    trace: Optional[StatefulTraceClient] = None, # type: ignore
     is_agent_builder: Optional[bool] = False,
-    target_agent_id: Optional[str] = None
+    target_agent_id: Optional[str] = None,
 ):
-    print(f"🔵 ===== run_agent函数开始执行 =====")
-    print(f"📋 输入参数:")
-    print(f"  - thread_id: {thread_id}")
-    print(f"  - project_id: {project_id}")
-    print(f"  - stream: {stream}")
-    print(f"  - model_name: {model_name}")
+    logger.info(f"  - thread_id: {thread_id}")
+    logger.info(f"  - project_id: {project_id}")
+    logger.info(f"  - stream: {stream}")
+    logger.info(f"  - model_name: {model_name}")
     if agent_config:
-        print(f"  - agent_config: {agent_config.get('name', 'Unknown')}")
+        logger.info(f"  - agent_config: {agent_config.get('name', 'Unknown')}")
     else:
         print(f"  - agent_config: None")
-    print(f"  - trace: {trace}")
-    print(f"✅ 参数打印完成")
-    print(f"🔄 ===== 模型选择逻辑 =====")
+
     effective_model = model_name
     if model_name == "deepseek/deepseek-chat" and agent_config and agent_config.get('model'):
         effective_model = agent_config['model']
-        print(f"  🔄 使用Agent配置中的模型: {effective_model}")
+        logger.info(f"Using model from agent config: {effective_model}")
     elif model_name != "deepseek/deepseek-chat":
-        print(f"  🔄 使用用户选择的模型: {effective_model}")
+        logger.info(f"Using user-selected model: {effective_model}")
     else:
-        print(f"  🔄 使用默认模型: {effective_model}")
-    print(f"  ✅ 最终模型: {effective_model}")
+        logger.info(f"Using default model: {effective_model}")
     
-    print(f"🔄 ===== 创建AgentConfig =====")
+    logger.info(f"Creating AgentConfig")
     config = AgentConfig(
         thread_id=thread_id,
         project_id=project_id,
@@ -847,23 +1076,20 @@ async def run_agent(
         reasoning_effort=reasoning_effort,
         enable_context_manager=enable_context_manager,
         agent_config=agent_config,
-        # trace=trace,
+        trace=trace,
         is_agent_builder=is_agent_builder,
-        target_agent_id=target_agent_id
+        target_agent_id=target_agent_id,
     )
-    print(f"  ✅ AgentConfig创建成功")
-    
-    print(f"🔄 ===== 创建AgentRunner =====")
+
+    # 创建 Runner 
     runner = AgentRunner(config)
-    print(f"  ✅ AgentRunner创建成功: {runner}")
+    logger.info(f"AgentRunner created successfully: {runner}")
     
-    print(f"🔄 ===== 开始执行runner.run() =====")
     try:
-        print(f"  🔄 开始执行runner.run() ！！！！！！！！！！！！！！")
+        logger.info(f"Starting to run runner.run()")
         async for chunk in runner.run():
-            print(f"  📝 生成chunk: {chunk.get('type', 'unknown')}")
             yield chunk
     except Exception as run_error:
-        print(f"  ❌ runner.run()执行失败: {run_error}")
-        print(f"  📋 错误详情: {traceback.format_exc()}")
+        logger.error(f"runner.run() failed: {run_error}")
+        logger.error(f"Error details: {traceback.format_exc()}")
         raise run_error

@@ -294,6 +294,11 @@ async def stop_agent_run(agent_run_id: str, error_message: Optional[str] = None)
     logger.info(f"Successfully initiated stop process for agent run: {agent_run_id}")
 
 async def get_agent_run_with_access_check(client, agent_run_id: str, user_id: str):
+    """
+    1. 查询 agent_run 记录：根据 agent_run_id 从 agent_runs 表中查找对应的 agent 运行记录
+    2. 获取关联的 thread 信息：通过 thread_id 查询对应的线程记录
+    3. 权限验证：检查当前用户是否有权限访问这个 agent_run
+    """
     # 先查询 agent_run，使用新的 agent_run_id 字段
     agent_run = await client.table('agent_runs').select('*').eq('agent_run_id', agent_run_id).execute()
     if not agent_run.data:
@@ -307,9 +312,12 @@ async def get_agent_run_with_access_check(client, agent_run_id: str, user_id: st
     if not thread_result.data:
         raise HTTPException(status_code=404, detail="Thread not found")
     
+    # 如果 agent_run 的 account_id 与 user_id 相同，则直接返回 agent_run_data
     account_id = thread_result.data[0]['account_id']
     if account_id == user_id:
         return agent_run_data
+
+    # 如果 agent_run 的 account_id 与 user_id 不同，则需要验证用户是否有权限访问这个 agent_run，此逻辑用于扩展更丰富的权限控制
     await verify_thread_access(client, thread_id, user_id)
     return agent_run_data
 
@@ -556,6 +564,9 @@ async def start_agent(
         is_agent_builder=is_agent_builder,
         target_agent_id=target_agent_id,
         request_id=request_id,
+        # ADK相关参数
+        user_id=user_id,
+        user_message=body.prompt,  # 使用用户输入的prompt作为user_message
     )
 
     return {"agent_run_id": agent_run_id, "status": "running"}
@@ -779,23 +790,37 @@ async def stream_agent_run(
     request: Request = None
 ):
     """Stream the responses of an agent run using Redis Lists and Pub/Sub."""
-    logger.info(f"Starting stream for agent run: {agent_run_id}")
+    print(f"🚀 ===== 流式输出接口开始 =====")
+    print(f"  📋 agent_run_id: {agent_run_id}")
+    print(f"  🔑 token: {token[:10] if token else 'None'}...")
+    print(f"  🌐 request: {request}")
+    
+    print(f"Starting stream for agent run: {agent_run_id}")
     client = await db.client
 
-    user_id = await get_user_id_from_stream_auth(request, token) # practically instant
+    print(f"  🔐 开始用户身份验证...")
+    user_id = await get_user_id_from_stream_auth(request, token) # 瞬时验证
+    print(f"  ✅ 用户身份验证完成: {user_id}")
+    
+    print(f"  🔍 开始检查agent_run访问权限...")
     agent_run_data = await get_agent_run_with_access_check(client, agent_run_id, user_id) # 1 db query
+    print(f"  ✅ agent_run数据获取完成: {agent_run_data}")
 
+    # 结构化日志上下文，将 agent_run_id 和 user_id 绑定到当前请求的上下文中，后续的所有日志记录都会自动包含这些信息
     structlog.contextvars.bind_contextvars(
         agent_run_id=agent_run_id,
         user_id=user_id,
     )
 
-    response_list_key = f"agent_run:{agent_run_id}:responses"
-    response_channel = f"agent_run:{agent_run_id}:new_response"
-    control_channel = f"agent_run:{agent_run_id}:control" # Global control channel
+    # 定义Redis中的键名，用于流式输出的数据存储和通信
+    response_list_key = f"agent_run:{agent_run_id}:responses"  # Redis List 键名，存储 agent_run 的所有响应数据
+    response_channel = f"agent_run:{agent_run_id}:new_response" # Redis Pub/Sub 频道名，用于通知新响应到达
+    control_channel = f"agent_run:{agent_run_id}:control" # edis Pub/Sub 频道名，用于控制信号，比如发送停止、暂停、错误、管理流式输出的生命周期
+    
 
     async def stream_generator(agent_run_data):
-        logger.debug(f"Streaming responses for {agent_run_id} using Redis list {response_list_key} and channel {response_channel}")
+        print(f"   ===== 流式生成器开始 =====")
+        print(f"Streaming responses for {agent_run_id} using Redis list {response_list_key} and channel {response_channel}")
         last_processed_index = -1
         pubsub_response = None
         pubsub_control = None
@@ -804,75 +829,108 @@ async def stream_agent_run(
         initial_yield_complete = False
 
         try:
-            # 1. Fetch and yield initial responses from Redis list
+            # 1. 捕获 Redis List 中的初始响应，并发送给前端
+            # 目的：前端重连时，能获取到之前错过的响应
+            print(f"  📥 步骤1: 获取Redis中的初始响应...")
             initial_responses_json = await redis.lrange(response_list_key, 0, -1)
+            print(f"  📊 Redis中初始响应数量: {len(initial_responses_json) if initial_responses_json else 0}")
+            
             initial_responses = []
             if initial_responses_json:
                 initial_responses = [json.loads(r) for r in initial_responses_json]
-                logger.debug(f"Sending {len(initial_responses)} initial responses for {agent_run_id}")
-                for response in initial_responses:
-                    yield f"data: {json.dumps(response)}\n\n"
+                print(f"  📤 发送 {len(initial_responses)} 个初始响应给前端")
+                for i, response in enumerate(initial_responses):
+                    response_str = f"data: {json.dumps(response)}\n\n"
+                    print(f"    [{i+1}] 发送响应: {response}")
+                    yield response_str
                 last_processed_index = len(initial_responses) - 1
+                print(f"  ✅ 初始响应发送完成，最后处理索引: {last_processed_index}")
+            else:
+                print(f"  ℹ️ Redis中没有初始响应")
+            
             initial_yield_complete = True
 
-            # 2. Check run status
+            # 2. 状态检查
+            # 目的：避免对已完成的agent_run进行不必要的监听
+            print(f"  🔍 步骤2: 检查agent_run状态...")
             current_status = agent_run_data.get('status') if agent_run_data else None
+            print(f"  📊 当前状态: {current_status}")
 
+            # 如果agent_run状态不是running，则直接返回完成状态
             if current_status != 'running':
+                print(f"  ⚠️ Agent run {agent_run_id} 不在运行状态 (status: {current_status})，结束流式输出")
                 logger.info(f"Agent run {agent_run_id} is not running (status: {current_status}). Ending stream.")
-                yield f"data: {json.dumps({'type': 'status', 'status': 'completed'})}\n\n"
+                completion_message = {'type': 'status', 'status': 'completed'}
+                print(f"  📤 发送完成状态: {completion_message}")
+                yield f"data: {json.dumps(completion_message)}\n\n"
                 return
           
+            print(f"  ✅ Agent run正在运行，继续流式输出")
             structlog.contextvars.bind_contextvars(
                 thread_id=agent_run_data.get('thread_id'),
             )
 
-            # 3. Set up Pub/Sub listeners for new responses and control signals concurrently
+            # 3. 设置 Pub/Sub 监听器，用于接收新响应和控制信号
+            # 目的：建立实时监听，监听 Redis 中的新响应和控制信号，并将其传递给流式生成器
+            print(f"  📡 步骤3: 设置Pub/Sub监听器...")
             pubsub_response_task = asyncio.create_task(redis.create_pubsub())
             pubsub_control_task = asyncio.create_task(redis.create_pubsub())
             
             pubsub_response, pubsub_control = await asyncio.gather(pubsub_response_task, pubsub_control_task)
+            print(f"  ✅ Pub/Sub客户端创建完成")
             
             # Subscribe to channels concurrently
             response_subscribe_task = asyncio.create_task(pubsub_response.subscribe(response_channel))
             control_subscribe_task = asyncio.create_task(pubsub_control.subscribe(control_channel))
             
             await asyncio.gather(response_subscribe_task, control_subscribe_task)
+            print(f"  ✅ 订阅频道完成: {response_channel}, {control_channel}")
             
             logger.debug(f"Subscribed to response channel: {response_channel}")
             logger.debug(f"Subscribed to control channel: {control_channel}")
 
             # Queue to communicate between listeners and the main generator loop
             message_queue = asyncio.Queue()
+            print(f"  📨 消息队列创建完成")
 
+            # 消息处理循环
             async def listen_messages():
+                print(f"  👂 ===== 消息监听器开始 =====")
                 response_reader = pubsub_response.listen()
                 control_reader = pubsub_control.listen()
                 tasks = [asyncio.create_task(response_reader.__anext__()), asyncio.create_task(control_reader.__anext__())]
+                print(f"  📡 监听器任务创建完成")
 
                 while not terminate_stream:
+                    print(f"  🔄 等待消息...")
                     done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
                     for task in done:
                         try:
                             message = task.result()
+                            print(f"  📨 收到消息: {message}")
                             if message and isinstance(message, dict) and message.get("type") == "message":
                                 channel = message.get("channel")
                                 data = message.get("data")
                                 if isinstance(data, bytes): data = data.decode('utf-8')
+                                print(f"  📡 频道: {channel}, 数据: {data}")
 
                                 if channel == response_channel and data == "new":
+                                    print(f"  🔔 收到新响应通知")
                                     await message_queue.put({"type": "new_response"})
                                 elif channel == control_channel and data in ["STOP", "END_STREAM", "ERROR"]:
+                                    print(f"  🛑 收到控制信号: {data}")
                                     logger.info(f"Received control signal '{data}' for {agent_run_id}")
                                     await message_queue.put({"type": "control", "data": data})
                                     return # Stop listening on control signal
 
                         except StopAsyncIteration:
+                            print(f"  ⚠️ 监听器 {task} 停止")
                             logger.warning(f"Listener {task} stopped.")
                             # Decide how to handle listener stopping, maybe terminate?
                             await message_queue.put({"type": "error", "data": "Listener stopped unexpectedly"})
                             return
                         except Exception as e:
+                            print(f"  ❌ 监听器错误: {e}")
                             logger.error(f"Error in listener for {agent_run_id}: {e}")
                             await message_queue.put({"type": "error", "data": "Listener failed"})
                             return
@@ -886,83 +944,126 @@ async def stream_agent_run(
                                      tasks.append(asyncio.create_task(control_reader.__anext__()))
 
                 # Cancel pending listener tasks on exit
+                print(f"  🛑 取消待处理的监听器任务")
                 for p_task in pending: p_task.cancel()
                 for task in tasks: task.cancel()
 
 
             listener_task = asyncio.create_task(listen_messages())
+            print(f"  ✅ 监听器任务启动完成")
 
             # 4. Main loop to process messages from the queue
+            print(f"  🔄 ===== 主循环开始 =====")
             while not terminate_stream:
                 try:
+                    print(f"  📨 等待队列消息...")
                     queue_item = await message_queue.get()
-
+                    print(f"  📥 收到队列消息: {queue_item}")
                     if queue_item["type"] == "new_response":
-                        # Fetch new responses from Redis list starting after the last processed index
+                        print(f"  📤 处理新响应...")
+                        # 获取新响应并发送给前端
                         new_start_index = last_processed_index + 1
+                        print(f"  📍 从索引 {new_start_index} 开始获取新响应")
                         new_responses_json = await redis.lrange(response_list_key, new_start_index, -1)
+                        print(f"  📊 获取到 {len(new_responses_json) if new_responses_json else 0} 个新响应")
 
                         if new_responses_json:
                             new_responses = [json.loads(r) for r in new_responses_json]
                             num_new = len(new_responses)
+                            print(f"  📤 发送 {num_new} 个新响应给前端")
                             # logger.debug(f"Received {num_new} new responses for {agent_run_id} (index {new_start_index} onwards)")
-                            for response in new_responses:
-                                yield f"data: {json.dumps(response)}\n\n"
+                            for i, response in enumerate(new_responses):
+                                response_str = f"data: {json.dumps(response)}\n\n"
+                                print(f"    [{i+1}] 发送响应: {response}")
+                                yield response_str
                                 # Check if this response signals completion
                                 if response.get('type') == 'status' and response.get('status') in ['completed', 'failed', 'stopped']:
+                                    print(f"  🎯 检测到运行完成状态: {response.get('status')}")
                                     logger.info(f"Detected run completion via status message in stream: {response.get('status')}")
                                     terminate_stream = True
                                     break # Stop processing further new responses
                             last_processed_index += num_new
-                        if terminate_stream: break
+                            print(f"  ✅ 新响应处理完成，最后处理索引: {last_processed_index}")
+                        else:
+                            print(f"  ℹ️ 没有新响应")
+                        if terminate_stream: 
+                            print(f"  🛑 流式输出终止")
+                            break
 
                     elif queue_item["type"] == "control":
                         control_signal = queue_item["data"]
+                        print(f"  🛑 收到控制信号: {control_signal}")
                         terminate_stream = True # Stop the stream on any control signal
-                        yield f"data: {json.dumps({'type': 'status', 'status': control_signal})}\n\n"
+                        control_message = {'type': 'status', 'status': control_signal}
+                        print(f"  📤 发送控制状态: {control_message}")
+                        yield f"data: {json.dumps(control_message)}\n\n"
                         break
 
                     elif queue_item["type"] == "error":
+                        print(f"  ❌ 监听器错误: {queue_item['data']}")
                         logger.error(f"Listener error for {agent_run_id}: {queue_item['data']}")
                         terminate_stream = True
-                        yield f"data: {json.dumps({'type': 'status', 'status': 'error'})}\n\n"
+                        error_message = {'type': 'status', 'status': 'error'}
+                        print(f"  📤 发送错误状态: {error_message}")
+                        yield f"data: {json.dumps(error_message)}\n\n"
                         break
 
                 except asyncio.CancelledError:
+                     print(f"  🛑 流式生成器主循环被取消")
                      logger.info(f"Stream generator main loop cancelled for {agent_run_id}")
                      terminate_stream = True
                      break
                 except Exception as loop_err:
+                    print(f"  ❌ 流式生成器主循环错误: {loop_err}")
                     logger.error(f"Error in stream generator main loop for {agent_run_id}: {loop_err}", exc_info=True)
                     terminate_stream = True
-                    yield f"data: {json.dumps({'type': 'status', 'status': 'error', 'message': f'Stream failed: {loop_err}'})}\n\n"
+                    error_message = {'type': 'status', 'status': 'error', 'message': f'Stream failed: {loop_err}'}
+                    print(f"  📤 发送错误状态: {error_message}")
+                    yield f"data: {json.dumps(error_message)}\n\n"
                     break
 
         except Exception as e:
+            print(f"  ❌ 设置流式输出时发生错误: {e}")
             logger.error(f"Error setting up stream for agent run {agent_run_id}: {e}", exc_info=True)
             # Only yield error if initial yield didn't happen
             if not initial_yield_complete:
-                 yield f"data: {json.dumps({'type': 'status', 'status': 'error', 'message': f'Failed to start stream: {e}'})}\n\n"
+                 error_message = {'type': 'status', 'status': 'error', 'message': f'Failed to start stream: {e}'}
+                 print(f"  📤 发送启动错误状态: {error_message}")
+                 yield f"data: {json.dumps(error_message)}\n\n"
         finally:
+            print(f"  🧹 ===== 清理资源 =====")
             terminate_stream = True
             # Graceful shutdown order: unsubscribe → close → cancel
-            if pubsub_response: await pubsub_response.unsubscribe(response_channel)
-            if pubsub_control: await pubsub_control.unsubscribe(control_channel)
-            if pubsub_response: await pubsub_response.close()
-            if pubsub_control: await pubsub_control.close()
+            if pubsub_response: 
+                print(f"  📡 取消订阅响应频道")
+                await pubsub_response.unsubscribe(response_channel)
+            if pubsub_control: 
+                print(f"  📡 取消订阅控制频道")
+                await pubsub_control.unsubscribe(control_channel)
+            if pubsub_response: 
+                print(f"  📡 关闭响应Pub/Sub连接")
+                await pubsub_response.close()
+            if pubsub_control: 
+                print(f"  📡 关闭控制Pub/Sub连接")
+                await pubsub_control.close()
 
             if listener_task:
+                print(f"  🛑 取消监听器任务")
                 listener_task.cancel()
                 try:
                     await listener_task  # Reap inner tasks & swallow their errors
                 except asyncio.CancelledError:
+                    print(f"  ✅ 监听器任务已取消")
                     pass
                 except Exception as e:
+                    print(f"  ⚠️ 监听器任务结束时有错误: {e}")
                     logger.debug(f"listener_task ended with: {e}")
             # Wait briefly for tasks to cancel
             await asyncio.sleep(0.1)
+            print(f"  ✅ 流式输出清理完成")
             logger.debug(f"Streaming cleanup complete for agent run: {agent_run_id}")
 
+    print(f"  开始创建StreamingResponse...")
     return StreamingResponse(stream_generator(agent_run_data), media_type="text/event-stream", headers={
         "Cache-Control": "no-cache, no-transform", "Connection": "keep-alive",
         "X-Accel-Buffering": "no", "Content-Type": "text/event-stream",
@@ -972,45 +1073,49 @@ async def stream_agent_run(
 async def generate_and_update_project_name(project_id: str, prompt: str):
     """Generates a project name using an LLM and updates the database."""
     logger.info(f"Starting background task to generate name for project: {project_id}")
-    try:
-        db_conn = DBConnection()
-        client = await db_conn.client
+    # TODO
+    pass
+    # try:
+    #     # 1. 初始化数据库连接
+    #     db_conn = DBConnection()
+    #     client = await db_conn.client
 
-        model_name = "openai/gpt-4o-mini"
-        system_prompt = "You are a helpful assistant that generates extremely concise titles (2-4 words maximum) for chat threads based on the user's message. Respond with only the title, no other text or punctuation."
-        user_message = f"Generate an extremely brief title (2-4 words only) for a chat thread that starts with this message: \"{prompt}\""
-        messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_message}]
 
-        logger.debug(f"Calling LLM ({model_name}) for project {project_id} naming.")
-        response = await make_llm_api_call(messages=messages, model_name=model_name, max_tokens=20, temperature=0.7)
+    #     model_name = "openai/gpt-4o-mini"
+    #     system_prompt = "You are a helpful assistant that generates extremely concise titles (2-4 words maximum) for chat threads based on the user's message. Respond with only the title, no other text or punctuation."
+    #     user_message = f"Generate an extremely brief title (2-4 words only) for a chat thread that starts with this message: \"{prompt}\""
+    #     messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_message}]
 
-        generated_name = None
-        if response and response.get('choices') and response['choices'][0].get('message'):
-            raw_name = response['choices'][0]['message'].get('content', '').strip()
-            cleaned_name = raw_name.strip('\'" \n\t')
-            if cleaned_name:
-                generated_name = cleaned_name
-                logger.info(f"LLM generated name for project {project_id}: '{generated_name}'")
-            else:
-                logger.warning(f"LLM returned an empty name for project {project_id}.")
-        else:
-            logger.warning(f"Failed to get valid response from LLM for project {project_id} naming. Response: {response}")
+    #     logger.debug(f"Calling LLM ({model_name}) for project {project_id} naming.")
+    #     response = await make_llm_api_call(messages=messages, model_name=model_name, max_tokens=20, temperature=0.7)
 
-        if generated_name:
-            # 修复数据库调用顺序：先设置条件，再调用update
-            update_result = await client.table('projects').eq("project_id", project_id).update({"name": generated_name})
-            if hasattr(update_result, 'data') and update_result.data:
-                logger.info(f"Successfully updated project {project_id} name to '{generated_name}'")
-            else:
-                logger.error(f"Failed to update project {project_id} name in database. Update result: {update_result}")
-        else:
-            logger.warning(f"No generated name, skipping database update for project {project_id}.")
+    #     generated_name = None
+    #     if response and response.get('choices') and response['choices'][0].get('message'):
+    #         raw_name = response['choices'][0]['message'].get('content', '').strip()
+    #         cleaned_name = raw_name.strip('\'" \n\t')
+    #         if cleaned_name:
+    #             generated_name = cleaned_name
+    #             logger.info(f"LLM generated name for project {project_id}: '{generated_name}'")
+    #         else:
+    #             logger.warning(f"LLM returned an empty name for project {project_id}.")
+    #     else:
+    #         logger.warning(f"Failed to get valid response from LLM for project {project_id} naming. Response: {response}")
 
-    except Exception as e:
-        logger.error(f"Error in background naming task for project {project_id}: {str(e)}\n{traceback.format_exc()}")
-    finally:
-        # No need to disconnect DBConnection singleton instance here
-        logger.info(f"Finished background naming task for project: {project_id}")
+    #     if generated_name:
+    #         # 修复数据库调用顺序：先设置条件，再调用update
+    #         update_result = await client.table('projects').eq("project_id", project_id).update({"name": generated_name})
+    #         if hasattr(update_result, 'data') and update_result.data:
+    #             logger.info(f"Successfully updated project {project_id} name to '{generated_name}'")
+    #         else:
+    #             logger.error(f"Failed to update project {project_id} name in database. Update result: {update_result}")
+    #     else:
+    #         logger.warning(f"No generated name, skipping database update for project {project_id}.")
+
+    # except Exception as e:
+    #     logger.error(f"Error in background naming task for project {project_id}: {str(e)}\n{traceback.format_exc()}")
+    # finally:
+    #     # No need to disconnect DBConnection singleton instance here
+    #     logger.info(f"Finished background naming task for project: {project_id}")
 
 @router.post("/agent/initiate", response_model=InitiateAgentResponse)
 async def initiate_agent_with_files(
@@ -1027,89 +1132,60 @@ async def initiate_agent_with_files(
     user_id: str = Depends(get_current_user_id_from_jwt)
 ):
     """
-    启动一个新的Agent会话，支持可选的文件附件
+    启动一个新的Agent会话,支持可选的文件附件
     
     参数说明:
     - prompt: 用户输入的提示词
-    - model_name: 使用的模型名称（如果为None则使用配置中的默认模型）
+    - model_name: 使用的模型名称(如果为None则使用配置中的默认模型)
     - enable_thinking: 是否启用思考模式
-    - reasoning_effort: 推理程度（low/medium/high）
+    - reasoning_effort: 推理程度(low/medium/high)
     - stream: 是否启用流式响应
     - enable_context_manager: 是否启用上下文管理器
-    - agent_id: 指定的Agent ID（可选）
+    - agent_id: 指定的Agent ID(可选)
     - files: 上传的文件列表
     - is_agent_builder: 是否为Agent构建器模式
-    - target_agent_id: 目标Agent ID（在构建器模式下使用）
-    - user_id: 当前用户ID（从JWT中获取）
-    
-    需要与create thread端点保持同步
+    - target_agent_id: 目标Agent ID(在构建器模式下使用)
+    - user_id: 当前用户ID(从JWT中获取)
     """
 
-    print("===== 开始处理 /agent/initiate 请求 =====")
-    
-    # 打印前端传递的所有参数
-    print("1. 前端传递的参数:")
-    print(f"  - prompt: {prompt}")
-    print(f"  - model_name: {model_name}")
-    
+    # 1. 提取前端传递的参数
+    logger.info(f"Starting new agent session with prompt: {prompt}")
+    logger.info(f"Starting new agent session with model name: {model_name}")
+
     # # 打印文件详细信息
     # for i, file in enumerate(files):
     #     print(f"  - 文件{i+1}: {file.filename} (大小: {file.size if hasattr(file, 'size') else '未知'} bytes, 类型: {file.content_type})")
     
-    global instance_id # 确保instance_id可访问
-    print(f"2. 当前instance_id: {instance_id}")
+    global instance_id
+    logger.info(f"Current instance_id: {instance_id}")
     if not instance_id:
-        print("Agent API未初始化，缺少instance_id")
+        logger.error("Agent API not initialized with instance ID")
         raise HTTPException(status_code=500, detail="Agent API not initialized with instance ID")
 
-    # 步骤1: 处理模型名称
-    print("🔧 步骤1: 处理模型名称")
-    print(f"  原始model_name: {model_name}")
+    logger.info(f"Processing model name: {model_name}")
 
+    # 2. 格式化需要使用的模型名称
+    # 如果前端没有传递模型名称，则使用配置中的默认模型
     if model_name is None:
         model_name = config.MODEL_TO_USE
-        print(f"  使用配置中的默认模型: {model_name}")
+        logger.info(f"No model name provided, using default model: {model_name}")
 
-    # 解析模型别名
+    # 处理模型名称，使其适配 LiteLLM 的模型定义规范， 如 deepseek-r1 → deepseek/deepseek-r1  claude-4-sonnet → anthropic/claude-4-sonnet
     resolved_model = MODEL_NAME_ALIASES.get(model_name, model_name)
-    print(f"  解析后的模型名称: {resolved_model}")
-
     # 更新model_name为解析后的版本
     model_name = resolved_model
-    print(f"  最终使用的模型: {model_name}")
 
-    # 步骤2: 检查Agent构建器模式
-    print("🔧 步骤2: 检查Agent构建器模式")
-    print(f"  is_agent_builder: {is_agent_builder}")
-    print(f"  target_agent_id: {target_agent_id}")
 
-    # 步骤3: 初始化数据库连接
-    print("🔧 步骤3: 初始化数据库连接")
-    print(f"  开始初始化Agent会话，文件数量: {len(files)}，实例ID: {instance_id}")
-    print(f"  模型: {model_name}, 启用思考: {enable_thinking}")
-    
+    # 3. 初始化数据库连接
     client = await db.client
-    print(f"  数据库连接成功，account_id: {user_id}")
+    logger.info(f"Database connection successful, account_id: {user_id}")
     
-    # 测试数据库连接 - 查询一个简单的表
-    try:
-        # 使用public schema查询users表
-        test_result = await client.schema('public').table('users').select('id, email, name').limit(1).execute()
-        print(f"  ✅ 数据库查询测试成功: 找到 {len(test_result.data)} 条记录")
-    except Exception as e:
-        print(f"  ❌ 数据库查询测试失败: {e}")
-        raise
-    
-    # 步骤4: 加载Agent配置（支持版本管理）
-    print("🔧 步骤4: 加载Agent配置")
-    
+    # 4: 加载Agent配置（支持版本管理）
     agent_config = None
-    
-    print(f"  Agent加载流程:")
-    print(f"  - 请求的agent_id: {agent_id}")
-    
+    logger.info(f"Requested agent_id: {agent_id}")
     if agent_id:
-        print("等待实现")
+        # TODO 等待实现
+        pass
         # print(f"  🎯 查询指定的Agent: {agent_id}")
         # # 获取指定的Agent
         # agent_result = await client.table('agents').select('*').eq('agent_id', agent_id).eq('account_id', user_id).execute()
@@ -1148,14 +1224,14 @@ async def initiate_agent_with_files(
         # else:
         #     logger.info(f"  🎯 使用自定义Agent: {agent_config['name']} ({agent_id}) - 无版本数据")
     else:
-        print(f"  🔍 未提供agent_id，查询默认Agent")
-        # 尝试获取用户的默认Agent
+        logger.info(f"No agent_id provided, querying default agent")
+        # 从数据库中获取当前用户的默认Agent
         default_agent_result = await client.schema('public').table('agents').select('*').eq('user_id', user_id).eq('is_default', True).execute()
-        print(f"  📊 默认Agent查询结果: 找到 {len(default_agent_result.data) if default_agent_result.data else 0} 个默认Agent")
+        logger.info(f"Default agent query result: found {len(default_agent_result.data) if default_agent_result.data else 0} default agents")
         
         if default_agent_result.data:
             agent_data = default_agent_result.data[0]
-            print(f"  ✅ 找到默认Agent: {agent_data.get('name', 'Unknown')} (ID: {agent_data.get('agent_id')})")
+            logger.info(f"Found default agent: {agent_data.get('name', 'Unknown')} (ID: {agent_data.get('agent_id')})")
             
             # 使用版本系统获取当前版本
             version_data = None
@@ -1178,14 +1254,14 @@ async def initiate_agent_with_files(
             agent_config = extract_agent_config(agent_data, version_data)
             
             if version_data:
-                print(f"  🎯 使用默认Agent: {agent_config['name']} ({agent_config['agent_id']}) 版本 {agent_config.get('version_name', 'v1')}")
+                logger.info(f"Using default agent: {agent_config['name']} ({agent_config['agent_id']}) version {agent_config.get('version_name', 'v1')}")
             else:
-                print(f"  🎯 使用默认Agent: {agent_config['name']} ({agent_config['agent_id']}) - 无版本数据")
+                logger.info(f"Using default agent: {agent_config['name']} ({agent_config['agent_id']}) - no version data")
         else:
-            print(f"  ⚠️ 用户 {user_id} 未找到默认Agent")
+            logger.warning(f"User {user_id} not found default agent")
             
-            # 🆕 自动创建默认Agent（兜底机制）
-            print(f"  🔧 为用户 {user_id} 自动创建默认Agent")
+            # 自动创建默认Agent（兜底机制）
+            logger.info(f"Creating default agent for user {user_id}")
             agent_id = await _create_default_agent_for_user(client, user_id)
             
             if agent_id:
@@ -1193,28 +1269,26 @@ async def initiate_agent_with_files(
                 default_agent_result = await client.schema('public').table('agents').select('*').eq('user_id', user_id).eq('is_default', True).execute()
                 if default_agent_result.data:
                     agent_data = default_agent_result.data[0]
-                    print(f"  ✅ 自动创建的默认Agent: {agent_data.get('name', 'Unknown')} (ID: {agent_data.get('agent_id')})")
+                    logger.info(f"Created default agent: {agent_data.get('name', 'Unknown')} (ID: {agent_data.get('agent_id')})")
                     
                     # 使用版本系统获取当前版本（暂时跳过）
                     version_data = None
                     agent_config = extract_agent_config(agent_data, version_data)
                     
-                    print(f"  🎯 使用自动创建的默认Agent: {agent_config['name']} ({agent_config['agent_id']})")
+                    logger.info(f"Using created default agent: {agent_config['name']} ({agent_config['agent_id']})")
                 else:
-                    print(f"  ❌ 自动创建默认Agent后仍然无法查询到")
+                    logger.error(f"Failed to query created default agent")
             else:
-                print(f"  ❌ 自动创建默认Agent失败")
-    
-    print(f"  📋 最终agent_config状态: {agent_config is not None}")
+                logger.error(f"Failed to create default agent")
+
     if agent_config:
-        print(f"  🔑 Agent配置键: {list(agent_config.keys())}")
-        print(f"  📝 Agent名称: {agent_config.get('name', 'Unknown')}")
-        print(f"  🆔 Agent ID: {agent_config.get('agent_id', 'Unknown')}")
+        logger.info(f"Agent config keys: {list(agent_config.keys())}")
+        logger.info(f"Agent name: {agent_config.get('name', 'Unknown')}")
+        logger.info(f"Agent ID: {agent_config.get('agent_id', 'Unknown')}")
 
     # 步骤5: 执行权限和限制检查
-    print("🔧 步骤5: 执行权限和限制检查")
+    logger.info(f"Executing permissions and limit checks")
     
-    print("  🔄 开始并发执行检查任务...")
     # 并发执行所有检查
     # model_check_task = asyncio.create_task(can_use_model(client, account_id, model_name))
     # 检查结果并抛出相应的错误
@@ -1222,23 +1296,21 @@ async def initiate_agent_with_files(
     # limit_check_task = asyncio.create_task(check_agent_run_limit(client, account_id))
 
     # 等待所有检查完成
-    print("  ⏳ 等待检查结果...")
     # (can_use, model_message, allowed_models), (can_run, message, subscription), limit_check = await asyncio.gather(
     #     model_check_task, billing_check_task, limit_check_task
     # )
 
     try:
-        # 步骤6: 创建项目和数据库记录
-        print("🔧 步骤6: 创建项目和数据库记录")
+        logger.info(f"Creating project and database record")
         
-        # 1. 创建项目
-        print("  📁 1. 创建项目")
-        placeholder_name = f"{prompt[:30]}..." if len(prompt) > 30 else prompt
-        print(f"    项目名称: {placeholder_name}")
+        # 5. 创建项目并生成项目ID,并插入到数据库中。注意：此操作仅用于初始化占位符
+        placeholder_name = f"{prompt[:30]}..." if len(prompt) > 30 else prompt if prompt else "新会话"
+        logger.info(f"New Project name: {placeholder_name}")
         
         project_id = str(uuid.uuid4())
-        print(f"    生成项目ID: {project_id}")
+        logger.info(f"Generated New project ID: {project_id}")
         
+        # 插入项目数据到数据库中
         project = await client.schema('public').table('projects').insert({
             "project_id": project_id, 
             "account_id": user_id, 
@@ -1247,11 +1319,8 @@ async def initiate_agent_with_files(
         })
         
         if not project.data:
-            print("  ❌ 项目创建失败")
+            logger.error(f"Failed to create project")
             raise Exception("Failed to create project")
-            
-        project_id = project.data[0]['project_id']
-        print(f"  ✅ 项目创建成功: {project_id}")
 
         # # 2. 创建沙盒（懒加载）：只有在文件上传时才立即创建
         # logger.info("  🏗️ 2. 处理沙盒创建")
@@ -1329,66 +1398,57 @@ async def initiate_agent_with_files(
         # else:
         #     logger.info("  ⏭️ 无文件上传，跳过沙盒创建")
 
-        # 3. 创建线程
-        print("  💬 3. 创建线程")
+        # 6. 创建线程（thread_id）并做关联
         thread_id = str(uuid.uuid4())
-        print(f"    生成线程ID: {thread_id}")
+        logger.info(f"Generated New thread ID: {thread_id}")
         
+        # 构建关联关系：user_id -> project_id -> thread_id
         thread_data = {
             "thread_id": thread_id, 
             "project_id": project_id, 
             "account_id": user_id,
             "created_at": datetime.now()
         }
-        print(f"    线程数据: {thread_data}")
 
-        # 绑定上下文变量
-        print("  🔗 绑定上下文变量...")
+        # 绑定上下文变量，用于在日志中追踪相关信息
         structlog.contextvars.bind_contextvars(
             thread_id=thread_data["thread_id"],
             project_id=project_id,
             account_id=user_id,
         )
         
-        # 线程现在是Agent无关的，不存储agent_id
+        # 线程是Agent无关的，不存储agent_id
         # Agent选择将在每个消息/Agent运行时处理
         if agent_config:
-            print(f"  🎯 使用Agent {agent_config['agent_id']} 进行对话 (线程保持Agent无关)")
+            logger.info(f"Using Agent {agent_config['agent_id']} for conversation (thread remains Agent-agnostic)")
             structlog.contextvars.bind_contextvars(
                 agent_id=agent_config['agent_id'],
             )
         
-        # 如果是Agent构建器会话，存储构建器元数据
-        if is_agent_builder:
-            print(f"  🔧 存储Agent构建器元数据: target_agent_id={target_agent_id}")
-            thread_data["metadata"] = {
-                "is_agent_builder": True,
-                "target_agent_id": target_agent_id
-            }
-            structlog.contextvars.bind_contextvars(
-                target_agent_id=target_agent_id,
-            )
+        # # 如果是Agent构建器会话，存储构建器元数据
+        # if is_agent_builder:
+        #     print(f"  🔧 存储Agent构建器元数据: target_agent_id={target_agent_id}")
+        #     thread_data["metadata"] = {
+        #         "is_agent_builder": True,
+        #         "target_agent_id": target_agent_id
+        #     }
+        #     structlog.contextvars.bind_contextvars(
+        #         target_agent_id=target_agent_id,
+        #     )
         
         # 插入线程到数据库
-        print("  💾 插入线程到数据库...")
         thread = await client.schema('public').table('threads').insert(thread_data)
         
         if not thread.data:
-            print("  ❌ 线程创建失败")
+            logger.error(f"Failed to create thread")
             raise Exception("Failed to create thread")
             
-        thread_id = thread.data[0]['thread_id']
-        print(f"  ✅ 线程创建成功: {thread_id}")
 
-        # 触发后台命名任务
-        print("  🏷️ 触发后台项目命名任务...")
+        # 在创建新的Agent会话时异步触发，通过大模型生成更贴合主题的会话名称 
         asyncio.create_task(generate_and_update_project_name(project_id=project_id, prompt=prompt))
 
-        # 4. 上传文件到沙盒（如果有）
-        print("  📁 4. 处理文件上传")
-        message_content = prompt
-        print(f"    初始消息内容: {prompt}")
-        
+        message_content = prompt    
+        # TODO：处理上传文件到沙盒（如果有）
         # if files:
         #     logger.info(f"  📤 开始上传 {len(files)} 个文件...")
         #     successful_uploads = []
@@ -1463,13 +1523,11 @@ async def initiate_agent_with_files(
         # else:
         #     logger.info("  ⏭️ 无文件需要上传")
 
-        # 5. 添加初始用户消息到线程
-        print("  💬 5. 添加初始用户消息")
-        message_id = str(uuid.uuid4())
-        print(f"    生成消息ID: {message_id}")
         
+     
+        # 5. 添加初始用户消息到线程
         message_payload = {"role": "user", "content": message_content}
-        print(f"    消息载荷: {message_payload}")
+        logger.info(f"New Message payload: {message_payload}")
         
         # 在ADK架构中，使用thread_id作为session_id
         # 这样可以保持与现有前端逻辑的兼容性
@@ -1477,35 +1535,48 @@ async def initiate_agent_with_files(
         
         # 创建ADK session（如果不存在）
         await _create_adk_session_if_not_exists(client, user_id, adk_session_id)
-        
-        # 使用ADK events表记录消息
-        await _log_adk_user_message_event(client, user_id, message_content, adk_session_id, message_id)
-        print(f"  ✅ 用户消息事件记录成功: {message_id}")
+        logger.info(f"Created ADK session successfully: {adk_session_id}")
 
-        # 6. 确定最终使用的模型
-        print("  🤖 6. 确定最终使用的模型")
+        # 使用ADK events表记录消息
+        message_id = str(uuid.uuid4())
+        await _log_adk_user_message_event(client, user_id, message_content, adk_session_id, message_id)
+        logger.info(f"User message event recorded successfully: {message_id}")
+
+        # 7. 确定最终使用的模型
+        
+        # 模型选择的优先级逻辑
+        # model_name ：用户在前端选择的模型
+        # agent_config.model ：用户在Agent配置中选择的模型
+        # MODEL_NAME_ALIASES，即config.MODEL_TO_USE，模型别名映射，在.ENV 文件中获取
+
+        # 优先级：用户在前端选择的模型 > Agent配置中选择的模型 > 模型别名映射
+        # 如果用户在前端选择的模型在MODEL_NAME_ALIASES中存在，则使用MODEL_NAME_ALIASES中的模型
+        # 如果用户在前端选择的模型在MODEL_NAME_ALIASES中不存在，则使用用户在前端选择的模型
+        # 如果用户在Agent配置中选择的模型在MODEL_NAME_ALIASES中存在，则使用MODEL_NAME_ALIASES中的模型
         effective_model = model_name
         if not model_name and agent_config and agent_config.get('model'):
             effective_model = agent_config['model']
-            print(f"    用户未指定模型，使用Agent配置的模型: {effective_model}")
+            logger.info(f"User did not specify model, using Agent configured model: {effective_model}")
         elif model_name:
-            print(f"    使用用户选择的模型: {effective_model}")
+            logger.info(f"Using user selected model: {effective_model}")
         else:
-            print(f"    使用默认模型: {effective_model}")
+            logger.info(f"Using default model: {effective_model}")
         
-        print(f"    最终有效模型: {effective_model}")
-
-        # 7. 创建Agent运行记录
-        print("  🏃 7. 创建Agent运行记录")
+        # 完成模型别名解析，适配 LiteLLM 的规范
+        resolved_model = MODEL_NAME_ALIASES.get(effective_model, effective_model)
+        logger.info(f"Model alias resolved: {effective_model} -> {resolved_model}")
+        
+        # 8. 创建Agent运行记录的元数据
         agent_run_metadata = {
-            "model_name": effective_model,
-            "requested_model": model_name,
+            "model_name": resolved_model,  # 使用解析后的模型名
+            "requested_model": model_name,  # 保留用户原始请求
             "enable_thinking": enable_thinking,
             "reasoning_effort": reasoning_effort,
             "enable_context_manager": enable_context_manager
         }
-        print(f"    Agent运行元数据: {agent_run_metadata}")
+        logger.info(f"Agent run metadata: {agent_run_metadata}")
         
+        # 存储Agent运行记录到数据库中
         agent_run = await client.schema('public').table('agent_runs').insert({
             "thread_id": thread_id, 
             "status": "running",
@@ -1516,45 +1587,43 @@ async def initiate_agent_with_files(
         })
         
         if not agent_run.data:
-            print("  ❌ Agent运行记录创建失败")
+            logger.error(f"Failed to create agent run")
             raise Exception("Failed to create agent run")
             
         agent_run_id = str(agent_run.data[0].get('agent_run_id') or agent_run.data[0]['id'])
-        print(f"  ✅ Agent运行记录创建成功: {agent_run_id}")
+        logger.info(f"Created agent run ids: {agent_run_id}")
         
-        # 绑定Agent运行ID到上下文
+        # 绑定Agent运行ID到上下文，用于在日志中追踪相关信息
         structlog.contextvars.bind_contextvars(
             agent_run_id=agent_run_id,
         )
 
-        # 8. 在Redis中注册运行
-        print("  🔄 8. 在Redis中注册Agent运行")
+        # 9. 在Redis中注册运行
         instance_key = f"active_run:{instance_id}:{agent_run_id}"
         try:
             await redis.set(instance_key, "running", ex=redis.REDIS_KEY_TTL)
-            print(f"  ✅ Redis注册成功: {instance_key}")
+            logger.info(f"Redis registered successfully: {instance_key}")
         except Exception as e:
-            print(f"  ⚠️ Redis注册失败 ({instance_key}): {str(e)}")
+            logger.error(f"Redis registered failed ({instance_key}): {str(e)}")
 
-        # 9. 获取请求ID并启动后台Agent
-        print("  🚀 9. 启动后台Agent运行")
+        # 10. 获取请求ID并启动后台Agent
         request_id = structlog.contextvars.get_contextvars().get('request_id')
-        print(f"    请求ID: {request_id}")
+        logger.info(f"Request ID: {request_id}")
 
-        # 发送Agent运行任务到后台
-        print("  📤 发送Agent运行任务到后台...")
+        # 11. 发送Agent运行任务到后台，这里才是真正开始执行Agent的逻辑
+        # 注意：这里不需要传递用户的请求，因为需要在后续的处理中通过查询数据库来获取
         try:
             message = run_agent_background.send(
                 agent_run_id=agent_run_id, 
                 thread_id=thread_id, 
                 instance_id=instance_id,
                 project_id=project_id,
-                model_name=model_name,  # 上面已解析
+                model_name=resolved_model, 
                 enable_thinking=enable_thinking, 
                 reasoning_effort=reasoning_effort,
                 stream=stream, 
                 enable_context_manager=enable_context_manager,
-                agent_config=agent_config,  # 传递Agent配置
+                agent_config=agent_config,  
                 is_agent_builder=is_agent_builder,
                 target_agent_id=target_agent_id,
                 request_id=request_id,
@@ -4137,27 +4206,42 @@ async def _create_adk_session_if_not_exists(client, user_id: str, session_id: st
                     """,
                     app_name, user_id, session_id, '{}', datetime.now(), datetime.now()
                 )
-                logger.info(f"创建ADK session: {session_id}")
+                logger.info(f"Created ADK session: {session_id}")
             else:
-                logger.debug(f"ADK session已存在: {session_id}")
+                logger.debug(f"ADK session already exists: {session_id}")
                 
     except Exception as e:
-        logger.error(f"创建ADK session失败: {e}")
+        logger.error(f"Create ADK session failed: {e}")
         raise
 
 async def _log_adk_user_message_event(client, user_id: str, message_content: str, session_id: str, message_id: str, app_name: str = "fufanmanus"):
     """记录用户消息事件到ADK events表"""
     try:
         import uuid
+        import pickle
+        from datetime import datetime
         event_id = str(uuid.uuid4())
         invocation_id = str(uuid.uuid4())
         
-        # 构建消息内容
+        # 💡 保持原有格式以兼容前端
         content = {
             "role": "user", 
-            "content": message_content,
+            "content": message_content,  # 保持简单格式，前端期望这个
             "message_id": message_id
         }
+        
+        # actions 需要手动序列化为字节（这是ADK的格式要求）
+        actions_dict = {
+            "skip_summarization": None,
+            "state_delta": {},
+            "artifact_delta": {},
+            "transfer_to_agent": None,
+            "escalate": None,
+            "requested_auth_configs": {}
+        }
+        
+        # 手动序列化 actions 字典为字节（这是ADK的格式要求）
+        actions_bytes = pickle.dumps(actions_dict)
         
         # 插入到ADK events表
         async with client.pool.acquire() as conn:
@@ -4170,14 +4254,14 @@ async def _log_adk_user_message_event(client, user_id: str, message_content: str
                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                 """,
                 event_id, app_name, user_id, session_id, invocation_id,
-                "user", datetime.now(), json.dumps(content), b''  # actions为空字节
+                "user", datetime.now(), json.dumps(content), actions_bytes  
             )
         
-        logger.info(f"记录用户消息事件成功: {event_id}")
+        logger.info(f"User message event recorded successfully: {event_id}")
         return event_id
         
     except Exception as e:
-        logger.error(f"记录用户消息事件失败: {e}")
+        logger.error(f"Record user message event failed: {e}")
         raise
 
 

@@ -88,20 +88,35 @@ async def get_optional_user_id(request: Request) -> Optional[str]:
 async def verify_thread_access(client, thread_id: str, user_id: str):
     """
     验证用户对线程的访问权限
-    简化版本，只检查用户是否为线程所有者
     """
     try:
-        # 获取线程的用户ID（假设threads表有user_id字段）
-        thread_result = await client.table('threads').select('account_id').eq('thread_id', thread_id).execute()
+        # 查询线程的完整信息
+        thread_result = await client.table('threads').select('*').eq('thread_id', thread_id).execute()
         
         if not thread_result.data:
             raise HTTPException(status_code=404, detail="Thread not found")
         
-        thread_user_id = thread_result.data[0]['account_id']
+        thread_data = thread_result.data[0]
+        thread_user_id = thread_data['account_id']
         
-        # 检查是否为线程所有者
-        if thread_user_id != user_id:
-            raise HTTPException(status_code=403, detail="Access to this thread is forbidden")
+        # 1. 检查是否为线程所有者
+        if thread_user_id == user_id:
+            return True
+        
+        # # 2. 检查项目是否为公开项目 TODO：如果涉及项目公开需求，可以放开，示例：
+        # project_id = thread_data.get('project_id')
+        # if project_id:
+        #     project_result = await client.table('projects').select('is_public').eq('project_id', project_id).execute()
+        #     if project_result.data and len(project_result.data) > 0:
+        #         if project_result.data[0].get('is_public'):
+        #             return True
+        
+        # 3. 检查是否为账户成员（如果需要团队协作功能）
+        # 这里可以根据你的具体需求实现账户成员检查
+        # 例如：检查用户是否在同一个账户/团队中
+        
+        # 如果都不满足，则拒绝访问
+        raise HTTPException(status_code=403, detail="Not authorized to access this thread")
         
     except HTTPException:
         raise

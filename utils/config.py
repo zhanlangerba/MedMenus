@@ -201,6 +201,7 @@ class Configuration:
     # LLM API keys
     ANTHROPIC_API_KEY: Optional[str] = None
     OPENAI_API_KEY: Optional[str] = None
+    DEEPSEEK_API_KEY: Optional[str] = None
     GROQ_API_KEY: Optional[str] = None
     OPENROUTER_API_KEY: Optional[str] = None
     XAI_API_KEY: Optional[str] = None
@@ -335,7 +336,7 @@ class Configuration:
     def __init__(self):
         """Initialize configuration by loading from environment variables."""
         # Load environment variables from .env file if it exists
-        load_dotenv()
+        load_dotenv(override=True)
         
         # Set environment mode first
         env_mode_str = os.getenv("ENV_MODE", EnvMode.LOCAL.value)

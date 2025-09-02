@@ -95,7 +95,7 @@ class ProcessorConfig:
 class ResponseProcessor:
     """Processes LLM responses, extracting and executing tool calls."""
     
-    def __init__(self, tool_registry: ToolRegistry, add_message_callback: Callable, trace: Optional[StatefulTraceClient] = None, is_agent_builder: bool = False, target_agent_id: Optional[str] = None, agent_config: Optional[dict] = None):
+    def __init__(self, tool_registry: ToolRegistry, add_message_callback: Callable, trace: Optional[StatefulTraceClient] = None, is_agent_builder: bool = False, target_agent_id: Optional[str] = None, agent_config: Optional[dict] = None): # type: ignore
         """Initialize the ResponseProcessor.
         
         Args:
@@ -147,6 +147,846 @@ class ResponseProcessor:
             agent_id=agent_id,
             agent_version_id=agent_version_id
         )
+
+    async def process_adk_streaming_response(
+        self,
+        adk_response: AsyncGenerator,
+        thread_id: str,
+        prompt_messages: List[Dict[str, Any]],
+        llm_model: str,
+        config: ProcessorConfig = ProcessorConfig(),
+        can_auto_continue: bool = False,
+        auto_continue_count: int = 0,
+        continuous_state: Optional[Dict[str, Any]] = None,
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        """
+        处理 Google ADK 流式响应，包括工具调用和执行
+        """
+
+        def _now_ts():
+            return datetime.now(timezone.utc).timestamp()
+
+        def _safe_text(x) -> str:
+            # 规避“can only concatenate str (not 'list') to str”
+            if isinstance(x, str):
+                return x
+            if isinstance(x, (list, tuple)):
+                return "".join(str(t) for t in x)
+            return str(x)
+
+        def _event_is_final(e) -> bool:
+            try:
+                # ADK 提供的最终响应判定
+                return bool(getattr(e, "is_final_response", None) and e.is_final_response())
+            except Exception:
+                # 回退逻辑：partial==False 且有 usage_metadata 时大概率为最终
+                return bool(getattr(e, "partial", None) is False and getattr(e, "usage_metadata", None) is not None)
+
+
+        # 运行状态初始化 
+        continuous_state = continuous_state or {}   # 保存跨轮次的状态信息
+        accumulated_content = continuous_state.get('accumulated_content', "") # 累积的内容，在下一轮中作为上下文
+        tool_calls_buffer = {} # 工具调用缓冲区
+        current_xml_content = accumulated_content   # 累积内容如果自动继续，否则为空
+        xml_chunks_buffer = [] # 累积 XML 内容
+        pending_tool_executions = [] # 待执行工具
+        yielded_tool_indices = set() # 存储已生成状态的工具索引
+        tool_index = 0 # 工具索引
+        xml_tool_call_count = 0 # XML 工具调用计数
+        finish_reason = None # 完成原因
+        should_auto_continue = False # 是否自动继续
+        last_assistant_message_object = None # 存储最终保存的 assistant 消息对象
+        tool_result_message_objects = {} # tool_index -> 完整保存的消息对象
+        has_printed_thinking_prefix = False # 标记是否打印思考前缀
+        agent_should_terminate = False # 标记是否执行终止工具
+        complete_native_tool_calls = [] # 初始化早期用于 assistant_response_end
+        
+        # 不作为流控制，仅用于最后记录
+        finish_reason = None           
+        saw_error = False
+        saw_length_limit = False
+
+        # 收集元数据以重建 LiteLLM 响应对象
+        streaming_metadata = {
+            "model": llm_model,
+            "created": None,
+            "usage": {
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0
+            },
+            "response_ms": None,
+            "first_chunk_time": None,
+            "last_chunk_time": None
+        }
+
+        print(
+            f"ADK Streaming Config: XML={config.xml_tool_calling}, "
+            f"Native={config.native_tool_calling}, Execute on stream={config.execute_on_stream}, "
+            f"Strategy={config.tool_execution_strategy}"
+        )
+
+        # 重用 / 创建 thread_run_id：保持相同的运行ID，在ADK 中是 invocation_id
+        thread_run_id = continuous_state.get('thread_run_id') or str(uuid.uuid4())
+        continuous_state['thread_run_id'] = thread_run_id
+        
+        print(f"thread_run_id: {thread_run_id}")
+
+        try:
+            # 当前已执行的自动继续次数
+            # 处理两种情况，1. finsh_reason=tool_calls 2. finsh_reason=length
+            # 在ADK 中，则是：get_function_calls() / get_function_responses() event.is_final_response()
+            # """
+            # 用户: "帮我搜索最新的科技新闻并分析趋势"
+            # LLM: "我来帮你搜索最新科技新闻..." [finish_reason: tool_calls]
+            # 系统: 自动继续，执行工具调用
+            # LLM: "根据搜索结果，当前主要趋势包括..." [finish_reason: stop]
+            # """
+            # if auto_continue_count == 0:  
+            #     start_content = {"status_type": "thread_run_start", "thread_run_id": thread_run_id}
+            #     # TODO: 适配 ADK 的 start 事件
+            #     start_msg_obj = await self.add_message(
+            #         thread_id=thread_id, type="status", content=start_content,
+            #         is_llm_message=False, metadata={"thread_run_id": thread_run_id}
+            #     )
+            #     if start_msg_obj:
+            #         yield format_for_yield(start_msg_obj)
+
+            #     assist_start_content = {"status_type": "assistant_response_start"}
+            #     assist_start_msg_obj = await self.add_message(
+            #         thread_id=thread_id, type="status", content=assist_start_content,
+            #         is_llm_message=False, metadata={"thread_run_id": thread_run_id}
+            #     )
+            #     if assist_start_msg_obj:
+            #         yield format_for_yield(assist_start_msg_obj)
+
+            # 序列号计数器，用于为每个yield的消息块分配唯一的、连续的序号
+            # """
+            # 支持auto-continue的连续性
+            # 场景1：正常流式响应
+            # sequence: 0  -> "你好"
+            # sequence: 1  -> "，我是"
+            # sequence: 2  -> "AI助手"
+            # sequence: 3  -> "。"
+
+            # 场景2：Auto-continue场景
+            # 第一轮：
+            # sequence: 0  -> "你好，我是AI助手"
+            # sequence: 1  -> "，我可以"
+            # [finish_reason: length, auto-continue]
+
+            # 第二轮（从sequence: 2开始）：
+            # sequence: 2  -> "帮你"
+            # sequence: 3  -> "回答问题"
+            # sequence: 4  -> "。"
+            
+            # """
+            __sequence = continuous_state.get('sequence', 0)
+
+            # 这里开始流式处理异步的Runner
+            async for event in adk_response:
+                # 获取当前执行的时间戳
+                now_ts = _now_ts()
+                # 如果first_chunk_time为空，则设置为当前时间
+                if streaming_metadata["first_chunk_time"] is None:
+                    streaming_metadata["first_chunk_time"] = now_ts
+                # 更新最后的时间戳
+                streaming_metadata["last_chunk_time"] = now_ts
+
+                # 如果ADK事件包含usage_metadata，则更新流式元数据
+                if getattr(event, "usage_metadata", None):
+                    um = event.usage_metadata
+                    try:
+                        # 属性名基于 Google ADK usage_metadata 字段
+                        streaming_metadata["usage"]["prompt_tokens"] = getattr(um, "prompt_token_count", None)
+                        streaming_metadata["usage"]["completion_tokens"] = getattr(um, "candidates_token_count", None)
+                        streaming_metadata["usage"]["total_tokens"] = getattr(um, "total_token_count", None)
+                    except Exception as _:
+                        # 容错：即使 usage 字段结构变动，也不应中断
+                        pass
+                
+                # 从ADK事件中提取created时间
+                if getattr(event, "timestamp", None):
+                    streaming_metadata["created"] = event.timestamp
+                
+                # 添加模型信息
+                streaming_metadata["model"] = llm_model
+
+                # 错误 & 截断探测
+                error_code = getattr(event, "error_code", None)
+                error_msg = getattr(event, "error_message", None)
+                if error_code:
+                    saw_error = True
+                    # 约定：如果错误码等价于 token 截断
+                    if str(error_code).upper() in {"MAX_TOKENS", "TOKEN_LIMIT", "LENGTH"}:
+                        saw_length_limit = True
+
+                # 事件层面的状态位
+                partial = getattr(event, "partial", None)
+                turn_complete = getattr(event, "turn_complete", None)
+                is_final = _event_is_final(event)
+
+                # ADK 的动作（移交、升级、状态/工件 delta、鉴权请求等）
+                actions = getattr(event, "actions", None)
+                long_run_tools = list(getattr(event, "long_running_tool_ids", []) or [])
+
+                # 为每个 chunk 计算“所处状态”
+                def _derive_chunk_status() -> str:
+                    if error_code:
+                        return "error"
+                    if long_run_tools:
+                        return "tool_running"
+                    # 移交/升级具备优先级标记
+                    if actions and (getattr(actions, "transfer_to_agent", None) or getattr(actions, "escalate", None)):
+                        return "handover"
+                    if is_final:
+                        return "final"
+                    if partial is True:
+                        return "delta"
+                    if partial is False:
+                        # 非流式单发 or 未标注 usage 的尾包
+                        return "possibly_final"
+                    return "unknown"
+
+                # 用 _derive_chunk_status 来确定 finish_reason
+                finish_reason = _derive_chunk_status()
+                print(f"chunk_status: {finish_reason}")
+
+                
+                # 在 ADK 事件中提取文本块： Content.parts[*].text
+                content = getattr(event, "content", None)
+                chunk_text = ""  # 初始化 chunk_text
+                
+                if getattr(event, "content", None):
+                    parts = getattr(event.content, "parts", None)
+
+                    # TODO ： 如果是思考模型，需要处理思考模型的 reasoning_content
+                    # Check for and log Anthropic thinking content
+                    # if delta and hasattr(delta, 'reasoning_content') and delta.reasoning_content:
+                    #     if not has_printed_thinking_prefix:
+                    #         # print("[THINKING]: ", end='', flush=True)
+                    #         has_printed_thinking_prefix = True
+                    #     # print(delta.reasoning_content, end='', flush=True)
+                    #     # Append reasoning to main content to be saved in the final message
+                    #     reasoning_content = delta.reasoning_content
+                    #     if isinstance(reasoning_content, list):
+                    #         reasoning_content = ' '.join(str(item) for item in reasoning_content)
+                    #     elif not isinstance(reasoning_content, str):
+                    #         reasoning_content = str(reasoning_content)
+                    #     accumulated_content += reasoning_content
+
+                    if parts:
+                        # 确保我们只取字符串文本
+                        texts: List[str] = []
+                        for p in parts:
+                            t = getattr(p, "text", None)
+                            if t is None:
+                                # 容错：Part 也可能是其他类型（如工具/引用），这里仅处理文本
+                                continue
+                            # 强制保证是 str
+                            if not isinstance(t, str):
+                                t = str(t)
+                            texts.append(t)
+                        if texts:
+                            chunk_text = "".join(texts)
+
+                    if chunk_text:
+                        # 追加到累积内容中
+                        accumulated_content += chunk_text
+                        current_xml_content += chunk_text
+
+                    # TODO： 这里需要处理工具调用
+                    # # Respect XML tool-call limit for yielding chunks (same semantics)
+                    # if not (config.max_xml_tool_calls > 0 and xml_tool_call_count >= config.max_xml_tool_calls):
+                    #     now_chunk_iso = datetime.now(timezone.utc).isoformat()
+                    #     yield {
+                    #         "sequence": __sequence,
+                    #         "message_id": None,
+                    #         "thread_id": thread_id,
+                    #         "type": "assistant",
+                    #         "is_llm_message": True,
+                    #         "content": to_json_string({"role": "assistant", "content": chunk_text}),
+                    #         "metadata": to_json_string({"stream_status": "chunk", "thread_run_id": thread_run_id}),
+                    #         "created_at": now_chunk_iso,
+                    #         "updated_at": now_chunk_iso
+                    #     }
+                    #     __sequence += 1
+                    # else:
+                    #     logger.info("XML tool call limit reached - not yielding more content chunks")
+                    #     self.trace.event(
+                    #         name="xml_tool_call_limit_reached",
+                    #         level="DEFAULT",
+                    #         status_message="XML tool call limit reached - not yielding more content chunks"
+                    #     )
+
+                    # # ---- XML tool-calls in-stream (same as original) ----
+                    # if config.xml_tool_calling and not (config.max_xml_tool_calls > 0 and xml_tool_call_count >= config.max_xml_tool_calls):
+                    #     xml_chunks = self._extract_xml_chunks(current_xml_content)
+                    #     for xml_chunk in xml_chunks:
+                    #         current_xml_content = current_xml_content.replace(xml_chunk, "", 1)
+                    #         xml_chunks_buffer.append(xml_chunk)
+                    #         result = self._parse_xml_tool_call(xml_chunk)
+                    #         if result:
+                    #             tool_call, parsing_details = result
+                    #             xml_tool_call_count += 1
+                    #             current_assistant_id = last_assistant_message_object['message_id'] if last_assistant_message_object else None
+                    #             context = self._create_tool_context(
+                    #                 tool_call, tool_index, current_assistant_id, parsing_details
+                    #             )
+
+                    #             if config.execute_tools and config.execute_on_stream:
+                    #                 # tool_started
+                    #                 started_msg_obj = await self._yield_and_save_tool_started(context, thread_id, thread_run_id)
+                    #                 if started_msg_obj:
+                    #                     yield format_for_yield(started_msg_obj)
+                    #                 yielded_tool_indices.add(tool_index)
+
+                    #                 execution_task = asyncio.create_task(self._execute_tool(tool_call))
+                    #                 pending_tool_executions.append({
+                    #                     "task": execution_task,
+                    #                     "tool_call": tool_call,
+                    #                     "tool_index": tool_index,
+                    #                     "context": context
+                    #                 })
+                    #                 tool_index += 1
+
+                    #             if config.max_xml_tool_calls > 0 and xml_tool_call_count >= config.max_xml_tool_calls:
+                    #                 logger.debug(f"Reached XML tool call limit ({config.max_xml_tool_calls})")
+                    #                 finish_reason = "xml_tool_limit_reached"
+                    #                 break
+
+                    # TODO 处理原生工具调用
+                    # # --- Process Native Tool Call Chunks ---
+                    # if config.native_tool_calling and delta and hasattr(delta, 'tool_calls') and delta.tool_calls:
+                    #     for tool_call_chunk in delta.tool_calls:
+                    #         # Yield Native Tool Call Chunk (transient status, not saved)
+                    #         # ... (safe extraction logic for tool_call_data_chunk) ...
+                    #         tool_call_data_chunk = {} # Placeholder for extracted data
+                    #         if hasattr(tool_call_chunk, 'model_dump'): tool_call_data_chunk = tool_call_chunk.model_dump()
+                    #         else: # Manual extraction...
+                    #             if hasattr(tool_call_chunk, 'id'): tool_call_data_chunk['id'] = tool_call_chunk.id
+                    #             if hasattr(tool_call_chunk, 'index'): tool_call_data_chunk['index'] = tool_call_chunk.index
+                    #             if hasattr(tool_call_chunk, 'type'): tool_call_data_chunk['type'] = tool_call_chunk.type
+                    #             if hasattr(tool_call_chunk, 'function'):
+                    #                 tool_call_data_chunk['function'] = {}
+                    #                 if hasattr(tool_call_chunk.function, 'name'): tool_call_data_chunk['function']['name'] = tool_call_chunk.function.name
+                    #                 if hasattr(tool_call_chunk.function, 'arguments'): tool_call_data_chunk['function']['arguments'] = tool_call_chunk.function.arguments if isinstance(tool_call_chunk.function.arguments, str) else to_json_string(tool_call_chunk.function.arguments)
+
+
+                    #         now_tool_chunk = datetime.now(timezone.utc).isoformat()
+                    #         yield {
+                    #             "message_id": None, "thread_id": thread_id, "type": "status", "is_llm_message": True,
+                    #             "content": to_json_string({"role": "assistant", "status_type": "tool_call_chunk", "tool_call_chunk": tool_call_data_chunk}),
+                    #             "metadata": to_json_string({"thread_run_id": thread_run_id}),
+                    #             "created_at": now_tool_chunk, "updated_at": now_tool_chunk
+                    #         }
+
+                    #         # --- Buffer and Execute Complete Native Tool Calls ---
+                    #         if not hasattr(tool_call_chunk, 'function'): continue
+                    #         idx = tool_call_chunk.index if hasattr(tool_call_chunk, 'index') else 0
+                    #         # ... (buffer update logic remains same) ...
+                    #         # ... (check complete logic remains same) ...
+                    #         has_complete_tool_call = False # Placeholder
+                    #         if (tool_calls_buffer.get(idx) and
+                    #             tool_calls_buffer[idx]['id'] and
+                    #             tool_calls_buffer[idx]['function']['name'] and
+                    #             tool_calls_buffer[idx]['function']['arguments']):
+                    #             try:
+                    #                 safe_json_parse(tool_calls_buffer[idx]['function']['arguments'])
+                    #                 has_complete_tool_call = True
+                    #             except json.JSONDecodeError: pass
+
+
+                    #         if has_complete_tool_call and config.execute_tools and config.execute_on_stream:
+                    #             current_tool = tool_calls_buffer[idx]
+                    #             tool_call_data = {
+                    #                 "function_name": current_tool['function']['name'],
+                    #                 "arguments": safe_json_parse(current_tool['function']['arguments']),
+                    #                 "id": current_tool['id']
+                    #             }
+                    #             current_assistant_id = last_assistant_message_object['message_id'] if last_assistant_message_object else None
+                    #             context = self._create_tool_context(
+                    #                 tool_call_data, tool_index, current_assistant_id
+                    #             )
+
+                    #             # Save and Yield tool_started status
+                    #             started_msg_obj = await self._yield_and_save_tool_started(context, thread_id, thread_run_id)
+                    #             if started_msg_obj: yield format_for_yield(started_msg_obj)
+                    #             yielded_tool_indices.add(tool_index) # Mark status as yielded
+
+                    #             execution_task = asyncio.create_task(self._execute_tool(tool_call_data))
+                    #             pending_tool_executions.append({
+                    #                 "task": execution_task, "tool_call": tool_call_data,
+                    #                 "tool_index": tool_index, "context": context
+                    #             })
+                    #             tool_index += 1
+
+                # TODO
+                # # 如果 ADK 标记为候选结束（partial==False），则可以视为自然停止，除非 finish_reason 存在
+                # if getattr(event, "partial", None) is False and not finish_reason:
+                #     finish_reason = "stop"
+
+                # if finish_reason == "xml_tool_limit_reached":
+                #     logger.info("Stopping stream processing after loop due to XML tool call limit")
+                #     self.trace.event(
+                #         name="stopping_stream_processing_after_loop_due_to_xml_tool_limit",
+                #         level="DEFAULT",
+                #         status_message="Stopping stream processing after loop due to XML tool call limit"
+                #     )
+                #     break
+
+            # -------- 流式循环的后处理工作 --------
+
+            # 如果模型接口没有返回使用数据，则使用litellm.token_counter计算
+            if streaming_metadata["usage"]["total_tokens"] == 0:
+                print("🔥 No usage data from provider, counting with litellm.token_counter")
+                try:
+                    prompt_tokens = token_counter(model=llm_model, messages=prompt_messages)
+                    completion_tokens = token_counter(model=llm_model, text=accumulated_content or "")
+                    streaming_metadata["usage"]["prompt_tokens"] = prompt_tokens
+                    streaming_metadata["usage"]["completion_tokens"] = completion_tokens
+                    streaming_metadata["usage"]["total_tokens"] = prompt_tokens + completion_tokens
+                    self.trace.event(
+                        name="usage_calculated_with_litellm_token_counter",
+                        level="DEFAULT",
+                        status_message="Usage calculated with litellm.token_counter"
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to calculate usage: {str(e)}")
+                    self.trace.event(
+                        name="failed_to_calculate_usage",
+                        level="WARNING",
+                        status_message=f"Failed to calculate usage: {str(e)}"
+                    )
+
+
+            # Wait any pending streamed tool executions
+            tool_results_buffer = [] # Stores (tool_call, result, tool_index, context)
+
+            # TODO： 处理Pending 工具调用的结果
+            # if pending_tool_executions:
+            #     logger.info(f"Waiting for {len(pending_tool_executions)} pending streamed tool executions")
+            #     self.trace.event(name="waiting_for_pending_streamed_tool_executions", level="DEFAULT", status_message=(f"Waiting for {len(pending_tool_executions)} pending streamed tool executions"))
+            #     # ... (asyncio.wait logic) ...
+            #     pending_tasks = [execution["task"] for execution in pending_tool_executions]
+            #     done, _ = await asyncio.wait(pending_tasks)
+
+            #     for execution in pending_tool_executions:
+            #         tool_idx = execution.get("tool_index", -1)
+            #         context = execution["context"]
+            #         tool_name = context.function_name
+                    
+            #         # Check if status was already yielded during stream run
+            #         if tool_idx in yielded_tool_indices:
+            #              logger.debug(f"Status for tool index {tool_idx} already yielded.")
+            #              # Still need to process the result for the buffer
+            #              try:
+            #                  if execution["task"].done():
+            #                      result = execution["task"].result()
+            #                      context.result = result
+            #                      tool_results_buffer.append((execution["tool_call"], result, tool_idx, context))
+                                 
+            #                      if tool_name in ['ask', 'complete']:
+            #                          logger.info(f"Terminating tool '{tool_name}' completed during streaming. Setting termination flag.")
+            #                          self.trace.event(name="terminating_tool_completed_during_streaming", level="DEFAULT", status_message=(f"Terminating tool '{tool_name}' completed during streaming. Setting termination flag."))
+            #                          agent_should_terminate = True
+                                     
+            #                  else: # Should not happen with asyncio.wait
+            #                     logger.warning(f"Task for tool index {tool_idx} not done after wait.")
+            #                     self.trace.event(name="task_for_tool_index_not_done_after_wait", level="WARNING", status_message=(f"Task for tool index {tool_idx} not done after wait."))
+            #              except Exception as e:
+            #                  logger.error(f"Error getting result for pending tool execution {tool_idx}: {str(e)}")
+            #                  self.trace.event(name="error_getting_result_for_pending_tool_execution", level="ERROR", status_message=(f"Error getting result for pending tool execution {tool_idx}: {str(e)}"))
+            #                  context.error = e
+            #                  # Save and Yield tool error status message (even if started was yielded)
+            #                  error_msg_obj = await self._yield_and_save_tool_error(context, thread_id, thread_run_id)
+            #                  if error_msg_obj: yield format_for_yield(error_msg_obj)
+            #              continue # Skip further status yielding for this tool index
+            #         # If status wasn't yielded before (shouldn't happen with current logic), yield it now
+            #         try:
+            #             if execution["task"].done():
+            #                 result = execution["task"].result()
+            #                 context.result = result
+            #                 tool_results_buffer.append((execution["tool_call"], result, tool_idx, context))
+                            
+            #                 # Check if this is a terminating tool
+            #                 if tool_name in ['ask', 'complete']:
+            #                     logger.info(f"Terminating tool '{tool_name}' completed during streaming. Setting termination flag.")
+            #                     self.trace.event(name="terminating_tool_completed_during_streaming", level="DEFAULT", status_message=(f"Terminating tool '{tool_name}' completed during streaming. Setting termination flag."))
+            #                     agent_should_terminate = True
+                                
+            #                 # Save and Yield tool completed/failed status
+            #                 completed_msg_obj = await self._yield_and_save_tool_completed(
+            #                     context, None, thread_id, thread_run_id
+            #                 )
+            #                 if completed_msg_obj: yield format_for_yield(completed_msg_obj)
+            #                 yielded_tool_indices.add(tool_idx)
+            #         except Exception as e:
+            #             logger.error(f"Error getting result/yielding status for pending tool execution {tool_idx}: {str(e)}")
+            #             self.trace.event(name="error_getting_result_yielding_status_for_pending_tool_execution", level="ERROR", status_message=(f"Error getting result/yielding status for pending tool execution {tool_idx}: {str(e)}"))
+            #             context.error = e
+            #             # Save and Yield tool error status
+            #             error_msg_obj = await self._yield_and_save_tool_error(context, thread_id, thread_run_id)
+            #             if error_msg_obj: yield format_for_yield(error_msg_obj)
+            #             yielded_tool_indices.add(tool_idx)
+
+
+            # # TODO：处理工具调用触达限制问题
+            # # Save and yield finish status if XML tool limit reached
+            # if finish_reason == "xml_tool_limit_reached":
+            #     finish_msg_obj = await self.add_message(
+            #         thread_id=thread_id,
+            #         type="status",
+            #         content={"status_type": "finish", "finish_reason": "xml_tool_limit_reached"},
+            #         is_llm_message=False,
+            #         metadata={"thread_run_id": thread_run_id}
+            #     )
+            #     if finish_msg_obj:
+            #         yield format_for_yield(finish_msg_obj)
+            #     logger.info(f"Stream finished with reason: xml_tool_limit_reached after {xml_tool_call_count} XML tool calls")
+
+            # 自动继续的条件： 如果可以自动继续，并且 finish_reason 是长度限制
+            should_auto_continue = (can_auto_continue and finish_reason == 'length')
+
+            # 保存并 yelid 最终的 assistant 消息
+            # -------- SAVE + YIELD final assistant message (if not auto-continue) --------
+            if accumulated_content and not should_auto_continue:
+                # TODO：
+                # 截断累积内容的逻辑
+                # # 如果由于 XML 容量限制而停止，则将内容截断至包含最后一个已关闭的 XML 标签。
+                # if config.max_xml_tool_calls > 0 and xml_tool_call_count >= config.max_xml_tool_calls and xml_chunks_buffer:
+                #     last_xml_chunk = xml_chunks_buffer[-1]
+                #     last_chunk_end_pos = accumulated_content.find(last_xml_chunk) + len(last_xml_chunk)
+                #     if last_chunk_end_pos > 0:
+                #         accumulated_content = accumulated_content[:last_chunk_end_pos]
+
+                # 从缓冲区构建完整的原生工具调用（如果将来启用了原生工具）
+                # if config.native_tool_calling:
+                #     for idx, tc_buf in tool_calls_buffer.items():
+                #         if tc_buf.get('id') and tc_buf.get('function', {}).get('name') and tc_buf['function'].get('arguments'):
+                #             try:
+                #                 args = safe_json_parse(tc_buf['function']['arguments'])
+                #                 complete_native_tool_calls.append({
+                #                     "id": tc_buf['id'], "type": "function",
+                #                     "function": {"name": tc_buf['function']['name'], "arguments": args}
+                #                 })
+                #             except json.JSONDecodeError:
+                #                 continue
+
+                # 构建最终的 assistant 消息
+                message_data = {
+                    "role": "assistant", 
+                    "content": accumulated_content, 
+                    "tool_calls": complete_native_tool_calls or None
+                    }
+
+                # 与原版一致：用 _add_message_with_agent_info 以便 metadata/agent 信息一致
+                last_assistant_message_object = await self._add_message_with_agent_info(
+                    thread_id=thread_id,
+                    type="assistant",
+                    content=message_data,
+                    is_llm_message=True,
+                    metadata={"thread_run_id": thread_run_id}
+                )
+
+                if last_assistant_message_object:
+                    yield_message = last_assistant_message_object.copy()
+                    print(f"拷贝的yield_message: {yield_message}")
+                    yield_metadata = ensure_dict(yield_message.get('metadata'), {})
+                    print(f"处理后的yield_metadata: {yield_metadata}")
+                    yield_metadata['stream_status'] = 'complete'
+                    print(f"处理后的yield_metadata: {yield_metadata}")
+                    yield_message['metadata'] = yield_metadata
+                    print(f"处理后的yield_message: {yield_message}")
+                    yield format_for_yield(yield_message)
+                else:
+                    logger.error(f"Failed to save final assistant message for thread {thread_id}")
+                    self.trace.event(
+                        name="failed_to_save_final_assistant_message_for_thread",
+                        level="ERROR",
+                        status_message=f"Failed to save final assistant message for thread {thread_id}"
+                    )
+                    err_msg_obj = await self.add_message(
+                        thread_id=thread_id,
+                        type="status",
+                        content={"role": "system", "status_type": "error", "message": "Failed to save final assistant message"},
+                        is_llm_message=False,
+                        metadata={"thread_run_id": thread_run_id}
+                    )
+                    if err_msg_obj:
+                        yield format_for_yield(err_msg_obj)
+
+            # -------- Execute any remaining tools after stream (same policy as original) --------
+            if config.execute_tools:
+                final_tool_calls_to_process: List[Dict[str, Any]] = []
+
+                # Native (buffered) — placeholder for future native support with ADK
+                if config.native_tool_calling and complete_native_tool_calls:
+                    for tc in complete_native_tool_calls:
+                        final_tool_calls_to_process.append({
+                            "function_name": tc["function"]["name"],
+                            "arguments": tc["function"]["arguments"],
+                            "id": tc["id"]
+                        })
+
+                # XML (from buffered xml_chunks not yet executed)
+                parsed_xml_data: List[Dict[str, Any]] = []
+                if config.xml_tool_calling:
+                    xml_chunks = self._extract_xml_chunks(current_xml_content)
+                    xml_chunks_buffer.extend(xml_chunks)
+                    remaining_limit = config.max_xml_tool_calls - xml_tool_call_count if config.max_xml_tool_calls > 0 else len(xml_chunks_buffer)
+                    xml_chunks_to_process = xml_chunks_buffer[:remaining_limit]
+
+                    for chunk in xml_chunks_to_process:
+                        parsed_result = self._parse_xml_tool_call(chunk)
+                        if parsed_result:
+                            tool_call, parsing_details = parsed_result
+                            if not any(execd['tool_call'] == tool_call for execd in pending_tool_executions):
+                                final_tool_calls_to_process.append(tool_call)
+                                parsed_xml_data.append({'tool_call': tool_call, 'parsing_details': parsing_details})
+
+                # Build mapping back indices
+                all_tool_data_map: Dict[int, Dict[str, Any]] = {}
+                native_tool_index = 0
+                if config.native_tool_calling and complete_native_tool_calls:
+                    for tc in complete_native_tool_calls:
+                        exec_tool_call = {"function_name": tc["function"]["name"], "arguments": tc["function"]["arguments"], "id": tc["id"]}
+                        all_tool_data_map[native_tool_index] = {"tool_call": exec_tool_call, "parsing_details": None}
+                        native_tool_index += 1
+
+                xml_tool_index_start = native_tool_index
+                for idx, item in enumerate(parsed_xml_data):
+                    all_tool_data_map[xml_tool_index_start + idx] = item
+
+                tool_results_map: Dict[int, Tuple[Dict[str, Any], Any, Any]] = {}
+
+                if config.execute_on_stream and tool_results_buffer:
+                    logger.info(f"Processing {len(tool_results_buffer)} buffered tool results")
+                    self.trace.event(
+                        name="processing_buffered_tool_results",
+                        level="DEFAULT",
+                        status_message=f"Processing {len(tool_results_buffer)} buffered tool results"
+                    )
+                    for tool_call, result, tool_idx, context in tool_results_buffer:
+                        if last_assistant_message_object:
+                            context.assistant_message_id = last_assistant_message_object['message_id']
+                        tool_results_map[tool_idx] = (tool_call, result, context)
+
+                elif final_tool_calls_to_process and not config.execute_on_stream:
+                    logger.info(f"Executing {len(final_tool_calls_to_process)} tools ({config.tool_execution_strategy}) after stream")
+                    self.trace.event(
+                        name="executing_tools_after_stream",
+                        level="DEFAULT",
+                        status_message=f"Executing {len(final_tool_calls_to_process)} tools ({config.tool_execution_strategy}) after stream"
+                    )
+                    results_list = await self._execute_tools(final_tool_calls_to_process, config.tool_execution_strategy)
+                    current_tool_idx = 0
+                    for tc, res in results_list:
+                        if current_tool_idx in all_tool_data_map:
+                            tool_data = all_tool_data_map[current_tool_idx]
+                            context = self._create_tool_context(
+                                tc, current_tool_idx,
+                                last_assistant_message_object['message_id'] if last_assistant_message_object else None,
+                                tool_data.get('parsing_details')
+                            )
+                            context.result = res
+                            tool_results_map[current_tool_idx] = (tc, res, context)
+                        else:
+                            logger.warning(f"Could not map result for tool index {current_tool_idx}")
+                            self.trace.event(
+                                name="could_not_map_result_for_tool_index",
+                                level="WARNING",
+                                status_message=f"Could not map result for tool index {current_tool_idx}"
+                            )
+                        current_tool_idx += 1
+
+                if tool_results_map:
+                    logger.info(f"Saving and yielding {len(tool_results_map)} final tool result messages")
+                    self.trace.event(
+                        name="saving_and_yielding_final_tool_result_messages",
+                        level="DEFAULT",
+                        status_message=f"Saving and yielding {len(tool_results_map)} final tool result messages"
+                    )
+                    for tool_idx in sorted(tool_results_map.keys()):
+                        tool_call, result, context = tool_results_map[tool_idx]
+                        context.result = result
+                        if not context.assistant_message_id and last_assistant_message_object:
+                            context.assistant_message_id = last_assistant_message_object['message_id']
+
+                        if not config.execute_on_stream and tool_idx not in yielded_tool_indices:
+                            started_msg_obj = await self._yield_and_save_tool_started(context, thread_id, thread_run_id)
+                            if started_msg_obj:
+                                yield format_for_yield(started_msg_obj)
+                            yielded_tool_indices.add(tool_idx)
+
+                        saved_tool_result_object = await self._add_tool_result(
+                            thread_id, tool_call, result, config.xml_adding_strategy,
+                            context.assistant_message_id, context.parsing_details
+                        )
+
+                        completed_msg_obj = await self._yield_and_save_tool_completed(
+                            context,
+                            saved_tool_result_object['message_id'] if saved_tool_result_object else None,
+                            thread_id, thread_run_id
+                        )
+                        if completed_msg_obj:
+                            yield format_for_yield(completed_msg_obj)
+
+                        if saved_tool_result_object:
+                            tool_result_message_objects[tool_idx] = saved_tool_result_object
+                            yield format_for_yield(saved_tool_result_object)
+                        else:
+                            logger.error(f"Failed to save tool result for index {tool_idx}, not yielding result message.")
+                            self.trace.event(
+                                name="failed_to_save_tool_result_for_index",
+                                level="ERROR",
+                                status_message=f"Failed to save tool result for index {tool_idx}, not yielding result message."
+                            )
+
+            # Final finish status (if not already yielded for XML cap)
+            if finish_reason and finish_reason != "xml_tool_limit_reached":
+                finish_msg_obj = await self.add_message(
+                    thread_id=thread_id,
+                    type="status",
+                    content={"status_type": "finish", "finish_reason": finish_reason},
+                    is_llm_message=False,
+                    metadata={"thread_run_id": thread_run_id}
+                )
+                if finish_msg_obj:
+                    yield format_for_yield(finish_msg_obj)
+
+            # Handle termination after executing terminating tools
+            if agent_should_terminate:
+                logger.info("Agent termination requested after executing ask/complete tool. Stopping further processing.")
+                self.trace.event(name="agent_termination_requested", level="DEFAULT", status_message="Agent termination requested after executing ask/complete tool. Stopping further processing.")
+                finish_reason = "agent_terminated"
+
+                finish_msg_obj = await self.add_message(
+                    thread_id=thread_id, type="status",
+                    content={"status_type": "finish", "finish_reason": "agent_terminated"},
+                    is_llm_message=False, metadata={"thread_run_id": thread_run_id}
+                )
+                if finish_msg_obj:
+                    yield format_for_yield(finish_msg_obj)
+
+                if last_assistant_message_object:
+                    try:
+                        if streaming_metadata["first_chunk_time"] and streaming_metadata["last_chunk_time"]:
+                            streaming_metadata["response_ms"] = (streaming_metadata["last_chunk_time"] - streaming_metadata["first_chunk_time"]) * 1000
+
+                        assistant_end_content = {
+                            "choices": [{
+                                "finish_reason": finish_reason or "stop",
+                                "index": 0,
+                                "message": {
+                                    "role": "assistant",
+                                    "content": accumulated_content,
+                                    "tool_calls": complete_native_tool_calls or None
+                                }
+                            }],
+                            "created": streaming_metadata.get("created"),
+                            "model": streaming_metadata.get("model", llm_model),
+                            "usage": streaming_metadata["usage"],
+                            "streaming": True,
+                        }
+                        if streaming_metadata.get("response_ms"):
+                            assistant_end_content["response_ms"] = streaming_metadata["response_ms"]
+
+                        await self.add_message(
+                            thread_id=thread_id,
+                            type="assistant_response_end",
+                            content=assistant_end_content,
+                            is_llm_message=False,
+                            metadata={"thread_run_id": thread_run_id}
+                        )
+                        logger.info("Assistant response end saved for stream (before termination)")
+                    except Exception as e:
+                        logger.error(f"Error saving assistant response end for stream (before termination): {str(e)}")
+                        self.trace.event(
+                            name="error_saving_assistant_response_end_for_stream_before_termination",
+                            level="ERROR",
+                            status_message=f"Error saving assistant response end for stream (before termination): {str(e)}"
+                        )
+                return  # terminate early
+
+            # Save assistant_response_end (only when not auto-continue)
+            if not should_auto_continue and last_assistant_message_object:
+                try:
+                    if streaming_metadata["first_chunk_time"] and streaming_metadata["last_chunk_time"]:
+                        streaming_metadata["response_ms"] = (streaming_metadata["last_chunk_time"] - streaming_metadata["first_chunk_time"]) * 1000
+
+                    assistant_end_content = {
+                        "choices": [{
+                            "finish_reason": finish_reason or "stop",
+                            "index": 0,
+                            "message": {
+                                "role": "assistant",
+                                "content": accumulated_content,
+                                "tool_calls": complete_native_tool_calls or None
+                            }
+                        }],
+                        "created": streaming_metadata.get("created"),
+                        "model": streaming_metadata.get("model", llm_model),
+                        "usage": streaming_metadata["usage"],
+                        "streaming": True,
+                    }
+                    if streaming_metadata.get("response_ms"):
+                        assistant_end_content["response_ms"] = streaming_metadata["response_ms"]
+
+                    await self.add_message(
+                        thread_id=thread_id,
+                        type="assistant_response_end",
+                        content=assistant_end_content,
+                        is_llm_message=False,
+                        metadata={"thread_run_id": thread_run_id}
+                    )
+                    logger.info("Assistant response end saved for stream")
+                except Exception as e:
+                    logger.error(f"Error saving assistant response end for stream: {str(e)}")
+                    self.trace.event(
+                        name="error_saving_assistant_response_end_for_stream",
+                        level="ERROR",
+                        status_message=f"Error saving assistant response end for stream: {str(e)}"
+                    )
+
+        except Exception as e:
+            logger.error(f"Error processing ADK streaming response: {str(e)}", exc_info=True)
+            self.trace.event(
+                name="error_processing_adk_stream",
+                level="ERROR",
+                status_message=f"Error processing ADK streaming response: {str(e)}"
+            )
+            err_msg_obj = await self.add_message(
+                thread_id=thread_id, type="status",
+                content={"role": "system", "status_type": "error", "message": str(e)},
+                is_llm_message=False, metadata={"thread_run_id": thread_run_id if 'thread_run_id' in locals() else None}
+            )
+            if err_msg_obj:
+                yield format_for_yield(err_msg_obj)
+            raise
+
+        finally:
+            # Update continuous state or close run
+            if should_auto_continue:
+                continuous_state['accumulated_content'] = accumulated_content
+                continuous_state['sequence'] = __sequence
+                logger.info(f"Updated continuous state for auto-continue with {len(accumulated_content)} chars")
+            else:
+                try:
+                    end_msg_obj = await self.add_message(
+                        thread_id=thread_id, type="status",
+                        content={"status_type": "thread_run_end"},
+                        is_llm_message=False, metadata={"thread_run_id": thread_run_id if 'thread_run_id' in locals() else None}
+                    )
+                    if end_msg_obj:
+                        yield format_for_yield(end_msg_obj)
+                except Exception as final_e:
+                    logger.error(f"Error in finally block: {str(final_e)}", exc_info=True)
+                    self.trace.event(
+                        name="error_in_finally_block",
+                        level="ERROR",
+                        status_message=f"Error in finally block: {str(final_e)}"
+                    )
 
     async def process_streaming_response(
         self,

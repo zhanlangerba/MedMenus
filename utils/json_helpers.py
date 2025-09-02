@@ -7,6 +7,7 @@ them as proper JSONB objects in the database.
 
 import json
 from typing import Any, Union, Dict, List
+from datetime import datetime
 
 
 def ensure_dict(value: Union[str, Dict[str, Any], None], default: Dict[str, Any] = None) -> Dict[str, Any]:
@@ -162,6 +163,13 @@ def format_for_yield(message_object: Dict[str, Any]) -> Dict[str, Any]:
         
     # Create a copy to avoid modifying the original
     formatted = message_object.copy()
+    
+    # Convert UUID objects to strings
+    for key, value in formatted.items():
+        if hasattr(value, 'hex'):  # UUID objects have hex attribute
+            formatted[key] = str(value)
+        elif isinstance(value, datetime):
+            formatted[key] = value.isoformat()
     
     # Ensure content is a JSON string
     if 'content' in formatted and not isinstance(formatted['content'], str):

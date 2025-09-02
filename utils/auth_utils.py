@@ -152,3 +152,34 @@ class AuthUtils:
         except Exception as e:
             logger.error(f"Error checking token expiration: {e}")
             return True
+
+    @staticmethod
+    async def get_account_id_from_thread(client, thread_id: str) -> str:
+        """
+        根据线程ID获取账户ID
+        
+        Args:
+            client: 数据库客户端
+            thread_id: 线程ID
+            
+        Returns:
+            str: 账户ID
+            
+        Raises:
+            HTTPException: 如果线程不存在
+        """
+        try:
+            thread_result = await client.table('threads').select('account_id').eq('thread_id', thread_id).execute()
+            if not thread_result.data:
+                logger.error(f"Thread not found: {thread_id}")
+                raise HTTPException(status_code=404, detail="Thread not found")
+            
+            account_id = thread_result.data[0]['account_id']
+            logger.debug(f"Retrieved account_id {account_id} for thread {thread_id}")
+            return account_id
+            
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Error getting account_id from thread {thread_id}: {e}")
+            raise HTTPException(status_code=500, detail=f"Error retrieving account information: {str(e)}")

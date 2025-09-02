@@ -38,7 +38,7 @@ def initialize():
     connect_timeout = 10.0           # 连接超时时间，10秒
     retry_on_timeout = not (os.getenv("REDIS_RETRY_ON_TIMEOUT", "True").lower() != "true")  # 超时重试开关
 
-    logger.info(f"正在初始化Redis连接池: {redis_host}:{redis_port}，最大连接数: {max_connections}")
+    logger.info(f"Initializing Redis connection pool: {redis_host}:{redis_port}, max connections: {max_connections}")
 
     # 创建生产环境优化的连接池
     pool = redis.ConnectionPool(
@@ -66,21 +66,21 @@ async def initialize_async():
 
     async with _init_lock:  # 使用异步锁防止并发初始化
         if not _initialized:
-            logger.info("正在初始化Redis连接")
+            logger.info("Initializing Redis connection")
             initialize()  # 调用同步初始化函数
 
         try:
             # 测试连接，设置5秒超时
             await asyncio.wait_for(client.ping(), timeout=5.0)
-            logger.info("Redis连接成功")
+            logger.info("Redis connection initialized successfully")
             _initialized = True
         except asyncio.TimeoutError:
-            logger.error("Redis连接初始化超时")
+            logger.error("Redis connection initialization timeout")
             client = None
             _initialized = False
-            raise ConnectionError("Redis连接超时")
+            raise ConnectionError("Redis connection timeout")
         except Exception as e:
-            logger.error(f"Redis连接失败: {e}")
+            logger.error(f"Redis connection failed: {e}")
             client = None
             _initialized = False
             raise
@@ -94,30 +94,30 @@ async def close():
     
     # 关闭Redis客户端连接
     if client:
-        logger.info("正在关闭Redis连接")
+        logger.info("Closing Redis connection")
         try:
             await asyncio.wait_for(client.aclose(), timeout=5.0)  # 5秒超时关闭
         except asyncio.TimeoutError:
-            logger.warning("Redis连接关闭超时，强制关闭")
+            logger.warning("Redis connection close timeout, force close")
         except Exception as e:
-            logger.warning(f"关闭Redis客户端时出错: {e}")
+            logger.warning(f"Error closing Redis client: {e}")
         finally:
             client = None  # 清空客户端引用
     
     # 关闭Redis连接池
     if pool:
-        logger.info("正在关闭Redis连接池")
+        logger.info("Closing Redis connection pool")
         try:
             await asyncio.wait_for(pool.aclose(), timeout=5.0)  # 5秒超时关闭
         except asyncio.TimeoutError:
-            logger.warning("Redis连接池关闭超时，强制关闭")
+            logger.warning("Redis connection pool close timeout, force close")
         except Exception as e:
-            logger.warning(f"关闭Redis连接池时出错: {e}")
+            logger.warning(f"Error closing Redis connection pool: {e}")
         finally:
             pool = None  # 清空连接池引用
     
     _initialized = False  # 重置初始化状态
-    logger.info("Redis连接和连接池已关闭")
+    logger.info("Redis connection and connection pool closed")
 
 
 async def get_client():

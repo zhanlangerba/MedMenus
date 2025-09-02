@@ -91,16 +91,16 @@ class AuthService:
             'status': 'active'
         }, app_name)
         
-        # 记录注册事件
-        if session_id:
-            await self._log_adk_event(client, str(user['id']), 'user_register', {
-                'email': request.email,
-                'name': request.name,
-                'provider': 'local',
-                'registration_time': datetime.now().isoformat()
-            }, session_id, app_name)
-        else:
-            logger.warning(f"Skipping registration event log due to failed session creation for user {user['id']}")
+        # 🗑️ 移除：不再记录注册事件到events表，sessions表已经足够
+        # if session_id:
+        #     await self._log_adk_event(client, str(user['id']), 'user_register', {
+        #         'email': request.email,
+        #         'name': request.name,
+        #         'provider': 'local',
+        #         'registration_time': datetime.now().isoformat()
+        #     }, session_id, app_name)
+        # else:
+        #     logger.warning(f"Skipping registration event log due to failed session creation for user {user['id']}")
         
         # 🆕 创建默认Agent
         await self._create_default_agent(client, str(user['id']))
@@ -170,16 +170,6 @@ class AuthService:
             'login_time': datetime.now().isoformat(),
             'login_method': 'email_password'
         }, app_name)
-        
-        # 记录登录事件
-        if session_id:
-            await self._log_adk_event(client, str(user['id']), 'user_login', {
-                'email': request.email,
-                'login_time': datetime.now().isoformat(),
-                'login_method': 'email_password'
-            }, session_id, app_name)
-        else:
-            logger.warning(f"Skipping login event log due to failed session creation for user {user['id']}")
         
         logger.info(f"User logged in: {request.email}")
         

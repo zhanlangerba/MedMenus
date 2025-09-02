@@ -19,13 +19,24 @@ import litellm
 from litellm.files.main import ModelResponse
 from utils.logger import logger
 from utils.config import config
+from utils.constants import MODEL_NAME_ALIASES
 
 # litellm.set_verbose=True
 # Let LiteLLM auto-adjust params and drop unsupported ones (e.g., GPT-5 temperature!=1)
 litellm.modify_params = True
 litellm.drop_params = True
 
-# Constants
+    
+
+from google.genai import types # type: ignore
+from google.adk.agents.run_config import RunConfig, StreamingMode # type: ignore
+from google.adk.models.lite_llm import LiteLlm # type: ignore
+from google.adk.agents import LlmAgent # type: ignore
+from google.adk.sessions import DatabaseSessionService # type: ignore
+from google.adk import Runner # type: ignore
+
+
+# 常量
 MAX_RETRIES = 2
 RATE_LIMIT_DELAY = 30
 RETRY_DELAY = 0.1
@@ -293,7 +304,7 @@ async def make_llm_api_call(
     reasoning_effort: Optional[str] = 'low'
 ) -> Union[Dict[str, Any], AsyncGenerator, ModelResponse]:
     """
-    Make an API call to a language model using LiteLLM.
+    Make an API call to a language model using LiteLLM or Google ADK.
 
     Args:
         messages: List of message dictionaries for the conversation
@@ -322,7 +333,7 @@ async def make_llm_api_call(
     logger.info(f"Making LLM API call to model: {model_name} (Thinking: {enable_thinking}, Effort: {reasoning_effort})")
     logger.info(f"📡 API Call: Using model {model_name}")
 
-    api_key = "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"
+
     params = prepare_params(
         messages=messages,
         # model_name=model_name,
@@ -364,6 +375,258 @@ async def make_llm_api_call(
         error_msg += f". Last error: {str(last_error)}"
     logger.error(error_msg, exc_info=True)
     raise LLMRetryError(error_msg)
+
+
+async def make_adk_api_call(
+    messages: List[Dict[str, Any]],
+    model_name: str = "openai/gpt-4o",
+    temperature: float = 0,
+    max_tokens: Optional[int] = None,
+    tools: Optional[List[Dict[str, Any]]] = None,
+    tool_choice: str = "auto",
+    stream: bool = True,
+    enable_thinking: Optional[bool] = False,
+    reasoning_effort: Optional[str] = 'low',
+) -> Union[AsyncGenerator, Dict[str, Any]]:
+    """
+    Make an API call using Google ADK (Agent Development Kit).
+    
+    Args:
+        messages: List of message dictionaries with metadata (app_name, user_id, session_id, etc.)
+        model_name: Name of the model to use
+        temperature: Sampling temperature (0-1)
+        max_tokens: Maximum tokens in the response
+        tools: List of tool definitions for function calling
+        tool_choice: How to select tools ("auto" or "none")
+        stream: Whether to stream the response
+        enable_thinking: Whether to enable thinking
+        reasoning_effort: Level of reasoning effort
+        api_key: API key for the model
+        **kwargs: Additional parameters
+    
+    Returns:
+        AsyncGenerator: Streaming response from ADK
+    """
+
+    logger.info(f"Preparing to make ADK API call")
+    logger.info(f"Input parameters: model_name={model_name}, stream={stream}, temperature={temperature}")
+    logger.info(f"Messages length: {len(messages)}")
+
+
+    # 提取元数据
+    first_message = messages[0]
+    app_name = first_message.get('app_name', 'fufanmanus')
+    user_id = first_message.get('user_id', 'default_user')
+    session_id = first_message.get('session_id', 'default_session')
+
+    # 获取用户消息内容
+    user_message = None
+    for i, msg in enumerate(reversed(messages)):
+        if msg.get('role') == 'user':
+            content = msg.get('content', '')
+            
+            # 这里的逻辑用来适配处理多模态消息格式
+            if isinstance(content, list):
+                # 多模态消息：从列表中提取文本部分
+                text_parts = []
+                for part in content:
+                    if isinstance(part, dict) and part.get('type') == 'text':
+                        text_parts.append(part.get('text', ''))
+                user_message = ' '.join(text_parts).strip()
+                
+                # 如果有非文本内容，记录警告
+                non_text_parts = [p for p in content if isinstance(p, dict) and p.get('type') != 'text']
+                if non_text_parts:
+                    logger.warning(f"ADK runner only supports text input. Ignoring {len(non_text_parts)} non-text parts.")
+                    
+            elif isinstance(content, str):
+                # 普通文本消息
+                user_message = content
+            else:
+                # 其他格式，尝试转换为字符串
+                user_message = str(content) if content else ''
+                
+            break
+            
+    if not user_message:
+        raise LLMError("No user message found in messages")
+
+    # 创建用户内容
+    user_content = types.Content(
+        role='user', 
+        parts=[types.Part(text=user_message)]  # 现在确保 user_message 是字符串
+    )
+
+    # 设置流式模式
+    streaming_mode = StreamingMode.SSE if stream else StreamingMode.NONE
+    run_config = RunConfig(streaming_mode=streaming_mode)
+    
+    # 从模型名称解析实际使用的模型和API Key
+    resolved_model = MODEL_NAME_ALIASES.get(model_name, model_name)
+    logger.info(f"Resolved model: {resolved_model}")
+    # 根据模型提供商获取对应的API Key
+    resolved_api_key = None
+    provider = "Unknown"
+    
+    # 根据模型名称确定提供商并获取API Key
+    if "openai" in resolved_model.lower() or "gpt" in resolved_model.lower():
+        resolved_api_key = config.OPENAI_API_KEY
+        provider = "OpenAI"
+    elif "anthropic" in resolved_model.lower() or "claude" in resolved_model.lower():
+        resolved_api_key = config.ANTHROPIC_API_KEY
+        provider = "Anthropic"
+    elif "deepseek" in resolved_model.lower():
+        # 优先使用DEEPSEEK_API_KEY，回退到OPENAI_API_KEY（因为DeepSeek兼容OpenAI API）
+        resolved_api_key = getattr(config, 'DEEPSEEK_API_KEY', None) or config.OPENAI_API_KEY
+        provider = "DeepSeek" if getattr(config, 'DEEPSEEK_API_KEY', None) else "DeepSeek (using OpenAI key)"
+    elif "gemini" in resolved_model.lower():
+        resolved_api_key = config.GEMINI_API_KEY
+        provider = "Gemini"
+    elif "groq" in resolved_model.lower():
+        resolved_api_key = config.GROQ_API_KEY
+        provider = "Groq"
+    elif "xai" in resolved_model.lower():
+        resolved_api_key = config.XAI_API_KEY
+        provider = "xAI"
+    else:
+        # 默认使用OpenAI
+        resolved_api_key = config.OPENAI_API_KEY
+        provider = "OpenAI (default)"
+        logger.warning(f"Unrecognized model {resolved_model}, using default OpenAI configuration")
+
+
+    logger.info(f"Using provider: {provider}")
+    logger.info(f"API Key: {resolved_api_key}")
+    
+    logger.info(f"Creating LiteLlm model with model={resolved_model}")
+    
+    # 创建LiteLlm模型
+    model = LiteLlm(
+        model=resolved_model,
+        api_key=resolved_api_key
+    )
+    logger.info(f"Model created successfully: model={resolved_model}, provider={provider}")
+
+    # 提取 system_prompt
+    agent_instruction = "你是我的AI助手，请根据用户的问题给出回答。"  # 默认值
+    for msg in messages:
+        if msg.get('role') == 'system':
+            agent_instruction = msg.get('content', agent_instruction)
+            break
+            
+    # 创建 Agent 对象
+    agent = LlmAgent(
+        name=app_name,
+        model=model,
+        instruction=agent_instruction
+    )
+
+    logger.info(f"Agent created successfully: {agent}")
+
+
+    # 设置数据库会话服务
+    try:
+        DATABASE_URL = os.getenv('DATABASE_URL')
+        if not DATABASE_URL:
+            if hasattr(config, 'DATABASE_URL') and config.DATABASE_URL:
+                DATABASE_URL = config.DATABASE_URL
+            else:
+                DATABASE_URL = "postgresql://postgres:password@localhost:5432/fufanmanus"
+        # 为了日志安全，隐藏密码
+        from urllib.parse import urlparse, urlunparse
+        parsed_url = urlparse(DATABASE_URL)
+        safe_url = DATABASE_URL
+        if parsed_url.password:
+            safe_url = DATABASE_URL.replace(parsed_url.password, "********")
+        
+        logger.info(f"Using DATABASE_URL for SessionService: {safe_url}")
+    
+        session_service = DatabaseSessionService(DATABASE_URL)
+        
+        # 如果 DatabaseSessionService 创建成功，获取或创建会话
+        try:
+            # 先尝试获取现有会话
+            existing_session = await session_service.get_session(
+                app_name=app_name, 
+                user_id=user_id, 
+                session_id=session_id
+            )
+            
+            if existing_session:
+                logger.info(f"Using existing session: {existing_session}")
+            else:
+                # 会话不存在，创建新的
+                await session_service.create_session(app_name=app_name, user_id=user_id, session_id=session_id)
+                logger.info(f"Created new session: {session_id}")
+                
+        except Exception as session_error:
+            logger.error(f"Session operation failed: {session_error}")
+            
+            # 处理会话重复创建错误
+            if "duplicate key value violates unique constraint" in str(session_error):
+                logger.info(f"Session already exists, trying to get existing session...")
+                try:
+                    existing_session = await session_service.get_session(
+                        app_name=app_name, 
+                        user_id=user_id, 
+                        session_id=session_id
+                    )
+                    if existing_session:
+                        logger.info(f"Successfully got existing session: {existing_session}")
+                    else:
+                        raise Exception("Session should exist but cannot be retrieved")
+                except Exception as get_error:
+                    logger.error(f"Failed to get existing session: {get_error}")
+                    raise session_error
+                    
+            # 如果是数据损坏，尝试清理重建
+            elif "EOFError" in str(session_error) or "Ran out of input" in str(session_error):
+                try:
+                    # 清理损坏的数据
+                    import asyncpg
+                    conn = await asyncpg.connect(DATABASE_URL)
+                    try:
+                        await conn.execute("DELETE FROM events WHERE session_id = $1", session_id)
+                        await conn.execute("DELETE FROM sessions WHERE id = $1", session_id)
+                        logger.info(f"Cleaned up corrupted data: {session_id}")
+                    finally:
+                        await conn.close()
+                    
+                    # 重新创建会话
+                    await session_service.create_session(app_name=app_name, user_id=user_id, session_id=session_id)
+                    logger.info(f"Recreated session: {session_id}")
+                except Exception as cleanup_error:
+                    logger.error(f"Failed to cleanup and recreate session: {cleanup_error}")
+                    raise session_error
+            else:
+                raise session_error
+                
+    except Exception as e:
+        logger.error(f"DatabaseSessionService failed completely: {e}")
+        import traceback
+        traceback.print_exc()
+        logger.error(f"Failed to use DatabaseSessionService, using InMemorySessionService: {e}", exc_info=True)
+        
+        # 回退到内存会话服务
+        from google.adk.sessions import InMemorySessionService # type: ignore
+        session_service = InMemorySessionService()
+        await session_service.create_session(app_name=app_name, user_id=user_id, session_id=session_id)
+        logger.info(f"InMemorySessionService created successfully: {session_id}")
+
+    runner = Runner(
+        agent=agent,
+        app_name=app_name,
+        session_service=session_service
+    )
+
+    # 直接返回 runner.run_async 的异步生成器，就像 make_llm_api_call 返回 litellm.acompletion 一样
+    return runner.run_async(
+        user_id=user_id,
+        session_id=session_id,
+        new_message=user_content,
+        run_config=run_config
+    )
+
 
 # Initialize API keys on module import
 setup_api_keys()

@@ -13,3 +13,6 @@ user_id: "abc123"
               
 agent_id: "agent-001" (配置哪个AI助手)
 instance_id: "inst-001" (哪个后端服务器在处理)
+
+
+后台启动：dramatiq run_agent_background

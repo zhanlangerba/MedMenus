@@ -1,6 +1,13 @@
 from dotenv import load_dotenv # type: ignore
 load_dotenv()
 
+# Set logging level for development
+import os
+if not os.getenv("LOGGING_LEVEL"):
+    os.environ["LOGGING_LEVEL"] = "INFO"
+if not os.getenv("ENV_MODE"):
+    os.environ["ENV_MODE"] = "LOCAL"
+
 import asyncio
 import time
 import uuid
@@ -49,7 +56,7 @@ async def lifespan(app: FastAPI):
     try:
         # 初始化PostgreSQL数据库连接
         await db.initialize()
-        logger.info("PostgreSQL数据库连接初始化完成")
+        logger.info("PostgreSQL database connection initialized successfully")
         
         # 初始化Redis连接
         from services import redis

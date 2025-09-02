@@ -23,11 +23,11 @@ from agentpress.response_processor import (
 from services.postgresql import DBConnection
 from utils.logger import logger
 try:
-    from langfuse.client import StatefulGenerationClient, StatefulTraceClient
+    from langfuse.client import StatefulGenerationClient, StatefulTraceClient # type: ignore
 except ImportError:
     # 对于 langfuse 3.x 版本，尝试不同的导入路径
     try:
-        from langfuse import StatefulGenerationClient, StatefulTraceClient
+        from langfuse import StatefulGenerationClient, StatefulTraceClient # type: ignore
     except ImportError:
         # 如果都失败，使用 Any 类型
         from typing import Any
@@ -35,20 +35,18 @@ except ImportError:
         StatefulTraceClient = Any
 from services.langfuse import langfuse
 import datetime
-from litellm.utils import token_counter
+from litellm.utils import token_counter # type: ignore
 
 # Type alias for tool choice
 ToolChoice = Literal["auto", "required", "none"]
 
 class ThreadManager:
-    """Manages conversation threads with LLM models and tool execution.
-
-    Provides comprehensive conversation management, handling message threading,
-    tool registration, and LLM interactions with support for both standard and
-    XML-based tool execution patterns.
+    """
+    管理与大型语言模型的对话线程以及工具的执行过程。
+    提供全面的对话管理功能，包括消息线程处理、工具注册以及与语言模型的交互，支持标准和基于 XML 的工具执行模式。 
     """
 
-    def __init__(self, trace: Optional[StatefulTraceClient] = None, is_agent_builder: bool = False, target_agent_id: Optional[str] = None, agent_config: Optional[dict] = None):
+    def __init__(self, trace: Optional[StatefulTraceClient] = None, is_agent_builder: bool = False, target_agent_id: Optional[str] = None, agent_config: Optional[dict] = None): # type: ignore
         """Initialize ThreadManager.
 
         Args:
@@ -175,7 +173,7 @@ class ThreadManager:
 
         try:
             # Insert the message and get the inserted row data including the id
-            result = await client.table('messages').insert(data_to_insert).execute()
+            result = await client.table('messages').insert(data_to_insert)
             logger.info(f"Successfully added message to thread {thread_id}")
 
             if result.data and len(result.data) > 0 and isinstance(result.data[0], dict) and 'message_id' in result.data[0]:
@@ -282,7 +280,6 @@ class ThreadManager:
         except Exception as e:
             logger.error(f"Failed to get messages for thread {thread_id}: {str(e)}", exc_info=True)
             return []
-
 
     async def run_thread(
         self,

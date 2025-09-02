@@ -1,7 +1,6 @@
 import dotenv
 dotenv.load_dotenv(".env")
 
-print("🚀 ===== run_agent_background.py 文件已加载 =====")
 
 import sentry
 import asyncio
@@ -31,12 +30,6 @@ redis_port = int(os.getenv('REDIS_PORT', 6379))
 redis_password = os.getenv('REDIS_PASSWORD', '')
 redis_db = int(os.getenv('REDIS_DB', 0))
 
-print(f"🔧 ===== Redis Broker配置 =====")
-print(f"  📍 主机: {redis_host}")
-print(f"  🚪 端口: {redis_port}")
-print(f"  🔑 密码: {'已设置' if redis_password else '无'}")
-print(f"  🗄️ 数据库: {redis_db}")
-
 # 创建Redis broker，使用与 services/redis.py 相同的配置
 if redis_password:
     redis_broker = RedisBroker(
@@ -55,9 +48,6 @@ else:
     )
 
 dramatiq.set_broker(redis_broker)
-print(f"  ✅ Redis broker配置完成")
-print(f"🚀 ===== run_agent_background.py 初始化完成 =====")
-
 
 _initialized = False
 db = DBConnection()
@@ -85,7 +75,7 @@ async def check_health(key: str):
 async def run_agent_background(
     agent_run_id: str,
     thread_id: str,
-    instance_id: str, # Use the global instance ID passed during initialization
+    instance_id: str, 
     project_id: str,
     model_name: str,
     enable_thinking: Optional[bool],
@@ -98,102 +88,82 @@ async def run_agent_background(
     request_id: Optional[str] = None,
 ):
     """Run the agent in the background using Redis for state."""
-    print(f" ===== 后台Agent任务开始执行 =====")
-    print(f"  agent_run_id: {agent_run_id}")
-    print(f"  thread_id: {thread_id}")
-    print(f"  instance_id: {instance_id}")
-    print(f"  project_id: {project_id}")
-    print(f"  model_name: {model_name}")
     if agent_config:
-        print(f"  - agent_config: {agent_config}")
+        logger.info(f"Found agent_config: {agent_config}")
     else:
-        print(f"  - agent_config: None")
+        logger.info(f"No agent_config found")
     
+    # 先清除所有上下文变量
     structlog.contextvars.clear_contextvars()
+    # 再绑定新的上下文变量（当前运行）
     structlog.contextvars.bind_contextvars(
         agent_run_id=agent_run_id,
         thread_id=thread_id,
         request_id=request_id,
     )
-    print(f"  ✅ Structlog上下文变量设置完成")
-
-    print(f"🔄 ===== 初始化阶段 =====")
     try:
-        print(f"  🔄 开始初始化...")
+        # 初始化 Redis 和 Postgresql 连接实例
         await initialize()
-        print(f"  ✅ 初始化完成")
+        logger.info(f"Initialized Redis and Postgresql connection")
     except Exception as e:
-        print(f"  ❌ 初始化失败: {e}")
-        logger.critical(f"Failed to initialize Redis connection: {e}")
+        logger.error(f"Failed to initialize Redis connection: {e}")
         raise e
 
-    print(f"🔒 ===== 幂等性检查 =====")
-    # Idempotency check: prevent duplicate runs
+    # 幂等性检查：防止重复运行
     run_lock_key = f"agent_run_lock:{agent_run_id}"
-    print(f"  🔒 运行锁键: {run_lock_key}")
+    logger.info(f"Run lock key: {run_lock_key}")
     
-    # Try to acquire a lock for this agent run
-    print(f"  🔄 尝试获取运行锁...")
+    # 获取运行锁
     try:
-        print(f"    📡 调用Redis SET命令...")
         lock_acquired = await redis.set(run_lock_key, instance_id, nx=True, ex=redis.REDIS_KEY_TTL)
-        print(f"    ✅ Redis SET命令完成")
-        print(f"  📊 锁获取结果: {lock_acquired}")
+        logger.info(f"Redis SET command completed: {lock_acquired}")
     except Exception as redis_error:
-        print(f"    ❌ Redis锁操作失败: {redis_error}")
-        print(f"    📋 错误详情: {traceback.format_exc()}")
         logger.error(f"Redis lock operation failed: {redis_error}")
+        logger.error(f"Error details: {traceback.format_exc()}")
         raise redis_error
     
     if not lock_acquired:
-        print(f"  ⚠️ 锁获取失败，检查是否已有其他实例在处理...")
-        # Check if the run is already being handled by another instance
+        # 检查是否已有其他实例在处理
         try:
-            print(f"    📡 调用Redis GET命令...")
+            logger.info(f"Calling Redis GET command...")
             existing_instance = await redis.get(run_lock_key)
-            print(f"    ✅ Redis GET命令完成")
-            print(f"  📋 现有实例: {existing_instance}")
+            logger.info(f"Existing instance: {existing_instance}")
         except Exception as redis_error:
-            print(f"    ❌ Redis GET操作失败: {redis_error}")
-            print(f"    📋 错误详情: {traceback.format_exc()}")
             logger.error(f"Redis GET operation failed: {redis_error}")
+            logger.error(f"Error details: {traceback.format_exc()}")
             raise redis_error
         if existing_instance:
             existing_instance_str = existing_instance.decode() if isinstance(existing_instance, bytes) else existing_instance
-            print(f"  🚫 Agent运行 {agent_run_id} 已由实例 {existing_instance_str} 处理中，跳过重复执行")
-            logger.info(f"Agent run {agent_run_id} is already being processed by instance {existing_instance_str}. Skipping duplicate execution.")
+            logger.warning(f"Agent run {agent_run_id} is already being processed by instance {existing_instance_str}. Skipping duplicate execution.")
             return
         else:
-            print(f"  🔄 锁存在但无值，再次尝试获取...")
-            # Lock exists but no value, try to acquire again
+            # 锁存在但无值，再次尝试获取
             try:
-                print(f"    📡 调用Redis第二次SET命令...")
                 lock_acquired = await redis.set(run_lock_key, instance_id, nx=True, ex=redis.REDIS_KEY_TTL)
-                print(f"    ✅ Redis第二次SET命令完成")
-                print(f"  📊 第二次锁获取结果: {lock_acquired}")
+                logger.info(f"Second lock acquisition result: {lock_acquired}")
             except Exception as redis_error:
-                print(f"    ❌ Redis第二次锁操作失败: {redis_error}")
-                print(f"    📋 错误详情: {traceback.format_exc()}")
+                logger.error(f"Redis second lock operation failed: {redis_error}")
+                logger.error(f"Error details: {traceback.format_exc()}")
                 logger.error(f"Redis second lock operation failed: {redis_error}")
                 raise redis_error
             if not lock_acquired:
-                print(f"  🚫 Agent运行 {agent_run_id} 已由其他实例处理中，跳过重复执行")
+                logger.warning(f"Agent run {agent_run_id} is already being processed by another instance. Skipping duplicate execution.")
                 logger.info(f"Agent run {agent_run_id} is already being processed by another instance. Skipping duplicate execution.")
                 return
     else:
-        print(f"  ✅ 成功获取运行锁")
+        logger.info(f"Successfully acquired run lock")
 
-    print(f"🏷️ ===== Sentry标签设置 =====")
+    logger.info(f"Sentry tag setting started")
     try:
+        # 错误监控和性能追踪平台，用于实时监控应用程序的错误和性能问题。
         sentry.sentry.set_tag("thread_id", thread_id)
-        print(f"  ✅ Sentry标签设置完成")
+        logger.info(f"Sentry tag setting completed")
     except Exception as sentry_error:
-        print(f"  ⚠️ Sentry标签设置失败: {sentry_error}")
-        print(f"  📋 错误详情: {traceback.format_exc()}")
+        logger.error(f"Sentry tag setting failed: {sentry_error}")
+        logger.error(f"Error details: {traceback.format_exc()}")
         logger.warning(f"Sentry tag setting failed: {sentry_error}")
         # 继续执行，不中断流程
 
-    print(f"📝 ===== 日志记录 =====")
     try:
         logger.info(f"Starting background agent run: {agent_run_id} for thread: {thread_id} (Instance: {instance_id})")
         logger.info({
@@ -206,88 +176,49 @@ async def run_agent_background(
             "is_agent_builder": is_agent_builder,
             "target_agent_id": target_agent_id,
         })
-        print(f"  ✅ 日志记录完成")
+        logger.info(f"Logging completed")
     except Exception as log_error:
-        print(f"  ⚠️ 日志记录失败: {log_error}")
-        print(f"  📋 错误详情: {traceback.format_exc()}")
+        logger.error(f"Logging failed: {log_error}")
+        logger.error(f"Error details: {traceback.format_exc()}")
         # 继续执行，不中断流程
-    
-    print(f"🤖 ===== 模型选择逻辑 =====")
-    try:
-        print(f"  📋 输入模型名称: {model_name}")
-        effective_model = model_name
-        if model_name == "anthropic/claude-sonnet-4-20250514" and agent_config and agent_config.get('model'):
-            agent_model = agent_config['model']
-            print(f"  🔄 使用Agent配置中的模型: {agent_model}")
-            from utils.constants import MODEL_NAME_ALIASES
-            resolved_agent_model = MODEL_NAME_ALIASES.get(agent_model, agent_model)
-            effective_model = resolved_agent_model
-            print(f"  ✅ 模型解析结果: {agent_model} -> {effective_model}")
-            logger.info(f"Using model from agent config: {agent_model} -> {effective_model} (no user selection)")
-        else:
-            print(f"  🔄 使用用户选择或默认模型")
-            from utils.constants import MODEL_NAME_ALIASES
-            effective_model = MODEL_NAME_ALIASES.get(model_name, model_name)
-            if model_name != "anthropic/claude-sonnet-4-20250514":
-                print(f"  ✅ 用户选择模型: {model_name} -> {effective_model}")
-            logger.info(f"Using user-selected model: {model_name} -> {effective_model}")
-        
-        print(f"  ✅ 最终模型: {effective_model}")
-        logger.info(f"Using model: {effective_model}")
-        print(f"  🎯 最终有效模型: {effective_model}")
-        print(f"  🧠 思考模式: {enable_thinking}, 推理努力: {reasoning_effort}")
-        
-        logger.info(f"🚀 Using model: {effective_model} (thinking: {enable_thinking}, reasoning_effort: {reasoning_effort})")
-        if agent_config:
-            print(f"  🤖 使用自定义Agent: {agent_config.get('name', 'Unknown')}")
-            logger.info(f"Using custom agent: {agent_config.get('name', 'Unknown')}")
-        else:
-            print(f"  🤖 使用默认Agent配置")
-    except Exception as model_error:
-        print(f"  ❌ 模型选择逻辑失败: {model_error}")
-        print(f"  📋 错误详情: {traceback.format_exc()}")
-        logger.error(f"Model selection logic failed: {model_error}")
-        raise model_error
 
-    print(f"🔗 ===== 数据库连接和变量初始化 =====")
+
+    # 使用已解析的模型名
+    effective_model = model_name  # 现在传入的已经是解析后的最终模型名
+    logger.info(f"🚀 Using model: {effective_model} (thinking: {enable_thinking}, reasoning_effort: {reasoning_effort})")
+    if agent_config:
+        logger.info(f"Using custom agent: {agent_config.get('name', 'Unknown')}")
+    else:
+        logger.info(f"Using default agent config")
+
     try:
         client = await db.client
-        print(f"  ✅ 数据库客户端获取成功")
+        logger.info(f"Database client acquisition successful")
     except Exception as db_error:
-        print(f"  ❌ 数据库客户端获取失败: {db_error}")
-        print(f"  📋 错误详情: {traceback.format_exc()}")
         logger.error(f"Database client acquisition failed: {db_error}")
+        logger.error(f"Error details: {traceback.format_exc()}")
         raise db_error
     
+    # 初始化时间、响应计数、Pub/Sub、停止信号检查器、待处理Redis操作
     start_time = datetime.now(timezone.utc)
     total_responses = 0
     pubsub = None
     stop_checker = None
     stop_signal_received = False
-    pending_redis_operations = []  # 初始化这个变量
-    print(f"  📅 开始时间: {start_time}")
-    print(f"  📊 初始响应计数: {total_responses}")
+    pending_redis_operations = []  
 
-    print(f"🔑 ===== Redis键和频道定义 =====")
-    # Define Redis keys and channels
+    # 定义 Redis keys 和 channels
     response_list_key = f"agent_run:{agent_run_id}:responses"
     response_channel = f"agent_run:{agent_run_id}:new_response"
     instance_control_channel = f"agent_run:{agent_run_id}:control:{instance_id}"
     global_control_channel = f"agent_run:{agent_run_id}:control"
     instance_active_key = f"active_run:{instance_id}:{agent_run_id}"
     
-    print(f"  📋 Redis配置:")
-    print(f"    - response_list_key: {response_list_key}")
-    print(f"    - response_channel: {response_channel}")
-    print(f"    - instance_control_channel: {instance_control_channel}")
-    print(f"    - global_control_channel: {global_control_channel}")
-    print(f"    - instance_active_key: {instance_active_key}")
-
     async def check_for_stop_signal():
         nonlocal stop_signal_received
-        print(f"    🛑 停止信号检查器启动")
+        logger.info(f"Stop signal checker started")
         if not pubsub: 
-            print(f"    ⚠️ PubSub未初始化，退出检查器")
+            logger.warning(f"PubSub not initialized, exiting checker")
             return
         try:
             while not stop_signal_received:
@@ -296,79 +227,63 @@ async def run_agent_background(
                     data = message.get("data")
                     if isinstance(data, bytes): data = data.decode('utf-8')
                     if data == "STOP":
-                        print(f"    🛑 收到STOP信号")
                         logger.info(f"Received STOP signal for agent run {agent_run_id} (Instance: {instance_id})")
                         stop_signal_received = True
                         break
-                # Periodically refresh the active run key TTL
-                if total_responses % 50 == 0: # Refresh every 50 responses or so
+                # 持久化刷新活跃运行键的TTL
+                if total_responses % 50 == 0: # 每50个响应刷新一次
                     try: 
                         await redis.expire(instance_active_key, redis.REDIS_KEY_TTL)
-                        print(f"    🔄 刷新TTL (响应计数: {total_responses})")
+                        logger.info(f"TTL refreshed (response count: {total_responses})")
                     except Exception as ttl_err: 
-                        print(f"    ⚠️ TTL刷新失败: {ttl_err}")
                         logger.warning(f"Failed to refresh TTL for {instance_active_key}: {ttl_err}")
                 await asyncio.sleep(0.1) # Short sleep to prevent tight loop
         except asyncio.CancelledError:
-            print(f"    🚫 停止信号检查器被取消")
             logger.info(f"Stop signal checker cancelled for {agent_run_id} (Instance: {instance_id})")
         except Exception as e:
-            print(f"    ❌ 停止信号检查器错误: {e}")
             logger.error(f"Error in stop signal checker for {agent_run_id}: {e}", exc_info=True)
             stop_signal_received = True # Stop the run if the checker fails
 
-    print(f"📊 ===== Langfuse跟踪初始化 =====")
+    # 创建 Langfuse 跟踪
     trace = langfuse.trace(name="agent_run", id=agent_run_id, session_id=thread_id, metadata={"project_id": project_id, "instance_id": instance_id})
-    print(f"  ✅ Langfuse跟踪创建成功")
+    logger.info(f"Langfuse trace created successfully")
     
-    print(f"📡 ===== Pub/Sub设置 =====")
     try:
-        # Setup Pub/Sub listener for control signals
-        print(f"  🔄 创建PubSub连接...")
+        # 创建 Pub/Sub 连接
         pubsub = await redis.create_pubsub()
-        print(f"  ✅ PubSub连接创建成功")
+        logger.info(f"PubSub connection created successfully")
         
         try:
-            print(f"  🔄 订阅控制频道...")
             await retry(lambda: pubsub.subscribe(instance_control_channel, global_control_channel))
-            print(f"  ✅ 控制频道订阅成功")
+            logger.info(f"Control channels subscribed successfully")
         except Exception as e:
-            print(f"  ❌ Redis订阅控制频道失败: {e}")
             logger.error(f"Redis failed to subscribe to control channels: {e}", exc_info=True)
             raise e
 
         logger.debug(f"Subscribed to control channels: {instance_control_channel}, {global_control_channel}")
-        print(f"  🔄 启动停止信号检查器...")
         stop_checker = asyncio.create_task(check_for_stop_signal())
-        print(f"  ✅ 停止信号检查器启动成功")
-
-        print(f"  🔄 设置活跃运行键...")
+        logger.info(f"Stop signal checker started successfully")
         # Ensure active run key exists and has TTL
         await redis.set(instance_active_key, "running", ex=redis.REDIS_KEY_TTL)
-        print(f"  ✅ 活跃运行键设置成功")
+        logger.info(f"Active run key set successfully")
 
-
-        print(f"🚀 ===== Agent生成器初始化 =====")
-        # Initialize agent generator
-        print(f"  🔄 创建Agent生成器...")
+        # 初始化Agent生成器
         try:
-            print(f"    📡 准备调用run_agent函数...")
-            print(f"      📋 参数详情:")
-            print(f"        - thread_id: {thread_id}")
-            print(f"        - project_id: {project_id}")
-            print(f"        - stream: {stream}")
-            print(f"        - model_name: {effective_model}")
-            
-            print(f"    📡 开始调用run_agent函数...")
+            logger.info(f"Starting to call run_agent function")
+
+            # 这里开始执行Agent的逻辑
             agent_gen = run_agent(
-                thread_id=thread_id, project_id=project_id, stream=stream,
+                thread_id=thread_id, 
+                project_id=project_id, 
+                stream=stream,
                 model_name=effective_model,
-                enable_thinking=enable_thinking, reasoning_effort=reasoning_effort,
+                enable_thinking=enable_thinking, 
+                reasoning_effort=reasoning_effort,
                 enable_context_manager=enable_context_manager,
                 agent_config=agent_config,
                 trace=trace,
                 is_agent_builder=is_agent_builder,
-                target_agent_id=target_agent_id
+                target_agent_id=target_agent_id,
             )
             print(f"    ✅ run_agent函数调用成功，返回生成器对象")
             print(f"  ✅ Agent生成器创建成功")
