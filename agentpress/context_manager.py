@@ -181,7 +181,7 @@ class ContextManager:
         return messages
 
     def remove_meta_messages(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Remove meta messages from the messages."""
+        """Remove meta messages from the messages, but preserve ADK metadata fields."""
         result: List[Dict[str, Any]] = []
         for msg in messages:
             msg_content = msg.get('content')
@@ -204,7 +204,25 @@ class ContextManager:
                 new_msg["content"] = json.dumps(msg_content_copy)
                 result.append(new_msg)
             else:
-                result.append(msg)
+                # 创建消息副本，但保留ADK所需的元数据字段
+                new_msg = {}
+                
+                # 保留基础字段
+                for key in ['role', 'content']:
+                    if key in msg:
+                        new_msg[key] = msg[key]
+                
+                # 保留ADK元数据字段
+                for key in ['app_name', 'user_id', 'session_id']:
+                    if key in msg:
+                        new_msg[key] = msg[key]
+                
+                # 保留其他重要字段（如果存在）
+                for key in ['message_id', 'timestamp', 'invocation_id']:
+                    if key in msg:
+                        new_msg[key] = msg[key]
+                
+                result.append(new_msg)
         return result
 
     def compress_messages(self, messages: List[Dict[str, Any]], llm_model: str, max_tokens: Optional[int] = 41000, token_threshold: int = 4096, max_iterations: int = 5) -> List[Dict[str, Any]]:
@@ -230,7 +248,7 @@ class ContextManager:
             max_tokens = 41 * 1000 - 10000
 
         result = messages
-        result = self.remove_meta_messages(result)
+        # result = self.remove_meta_messages(result)
 
         uncompressed_total_token_count = token_counter(model=llm_model, messages=result)
 

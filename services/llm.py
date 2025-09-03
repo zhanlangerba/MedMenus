@@ -14,6 +14,7 @@ from typing import Union, Dict, Any, Optional, AsyncGenerator, List
 import os
 import json
 import asyncio
+import contextvars
 from openai import OpenAIError
 import litellm
 from litellm.files.main import ModelResponse
@@ -21,10 +22,61 @@ from utils.logger import logger
 from utils.config import config
 from utils.constants import MODEL_NAME_ALIASES
 
+# 🔗 Context variables for ADK callback
+manual_message_id_context: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar('manual_message_id', default=None)
+current_session_id_context: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar('current_session_id', default=None)
+
 # litellm.set_verbose=True
 # Let LiteLLM auto-adjust params and drop unsupported ones (e.g., GPT-5 temperature!=1)
 litellm.modify_params = True
 litellm.drop_params = True
+
+def set_manual_message_id(message_id: Optional[str]):
+    """设置手动插入消息的ID到上下文中，用于回调同步invocation_id"""
+    manual_message_id_context.set(message_id)
+    if message_id:
+        logger.debug(f"🔗 Set manual_message_id context: {message_id}")
+
+async def _sync_manual_message_invocation_id(session_id: str, adk_invocation_id: str):
+    """根据session_id找到最新的用户消息，同步其invocation_id为ADK生成的ID"""
+    try:
+        logger.info(f"Before _sync_manual_message_invocation_id: session_id={session_id}, adk_invocation_id={adk_invocation_id}")
+        
+        # 获取数据库客户端
+        from services.postgresql import DBConnection
+        db = DBConnection()
+        client = await db.client
+        
+        # 查找该 session_id 下最新的 author='user' 的消息
+        user_message_result = await client.table('events')\
+            .select('id, invocation_id, timestamp')\
+            .eq('session_id', session_id)\
+            .eq('author', 'user')\
+            .order('timestamp', desc=True)\
+            .limit(1)\
+            .execute()
+        
+        if not user_message_result.data:
+            logger.warning(f"Not found user message in session {session_id}")
+            return
+        
+        user_message = user_message_result.data[0]
+        message_id = user_message.get('id')
+        old_invocation_id = user_message.get('invocation_id')
+        
+        # 更新该用户消息的invocation_id为ADK生成的ID  
+        update_result = await client.table('events')\
+            .eq('id', message_id)\
+            .update({'invocation_id': adk_invocation_id})
+        
+        if update_result.data:
+            logger.info(f"Successfully synchronized invocation_id: {message_id} ({old_invocation_id} -> {adk_invocation_id})")
+   
+        else:
+            logger.warning(f"Failed to update user message: {message_id}")
+            
+    except Exception as e:
+        logger.warning(f"Failed to synchronize invocation_id (not affecting main flow): {e}")
 
     
 
@@ -33,7 +85,11 @@ from google.adk.agents.run_config import RunConfig, StreamingMode # type: ignore
 from google.adk.models.lite_llm import LiteLlm # type: ignore
 from google.adk.agents import LlmAgent # type: ignore
 from google.adk.sessions import DatabaseSessionService # type: ignore
+from services.model_only_session_service import ModelOnlyDBSessionService
 from google.adk import Runner # type: ignore
+from google.adk.agents.callback_context import CallbackContext # type: ignore
+from google.adk.models import LlmRequest, LlmResponse # type: ignore
+
 
 
 # 常量
@@ -387,9 +443,12 @@ async def make_adk_api_call(
     stream: bool = True,
     enable_thinking: Optional[bool] = False,
     reasoning_effort: Optional[str] = 'low',
+    # manual_message_id: Optional[str] = None,  # 🔗 现在使用上下文变量
 ) -> Union[AsyncGenerator, Dict[str, Any]]:
     """
     Make an API call using Google ADK (Agent Development Kit).
+    
+    Uses context variables to access manual_message_id for invocation_id synchronization.
     
     Args:
         messages: List of message dictionaries with metadata (app_name, user_id, session_id, etc.)
@@ -401,8 +460,6 @@ async def make_adk_api_call(
         stream: Whether to stream the response
         enable_thinking: Whether to enable thinking
         reasoning_effort: Level of reasoning effort
-        api_key: API key for the model
-        **kwargs: Additional parameters
     
     Returns:
         AsyncGenerator: Streaming response from ADK
@@ -412,12 +469,18 @@ async def make_adk_api_call(
     logger.info(f"Input parameters: model_name={model_name}, stream={stream}, temperature={temperature}")
     logger.info(f"Messages length: {len(messages)}")
 
-
     # 提取元数据
-    first_message = messages[0]
-    app_name = first_message.get('app_name', 'fufanmanus')
-    user_id = first_message.get('user_id', 'default_user')
-    session_id = first_message.get('session_id', 'default_session')
+    for message in messages:
+        if isinstance(message, dict) and message.get('role') == 'user':
+            app_name = message.get('app_name', 'fufanmanus')
+            user_id = message.get('user_id', 'default_user')
+            session_id = message.get('session_id', 'default_session')
+            logger.info(f"From adk events: app_name={app_name}, user_id={user_id}, session_id={session_id}")
+            
+            # 🔗 设置session_id到上下文中，供ADK回调使用
+            current_session_id_context.set(session_id)
+            print(f"🔗 设置session_id上下文: {session_id}")
+            break
 
     # 获取用户消息内容
     user_message = None
@@ -459,6 +522,7 @@ async def make_adk_api_call(
 
     # 设置流式模式
     streaming_mode = StreamingMode.SSE if stream else StreamingMode.NONE
+    
     run_config = RunConfig(streaming_mode=streaming_mode)
     
     # 从模型名称解析实际使用的模型和API Key
@@ -513,12 +577,39 @@ async def make_adk_api_call(
         if msg.get('role') == 'system':
             agent_instruction = msg.get('content', agent_instruction)
             break
+    
+    # 定义ADK回调函数，用于同步invocation_id（因为某条 User Messages 是手动插入，需要通过回调保持相同的 invocation_id
+    def before_model_callback(callback_context: CallbackContext, llm_request: LlmRequest) -> Optional[LlmResponse]:
+        """ADK回调：在LLM调用前同步invocation_id"""
+        try:
+      
+            # 从上下文变量获取session_id
+            session_id = current_session_id_context.get()
+            logger.info(f"From before_model_callback: session_id={session_id}")
             
-    # 创建 Agent 对象
+            # 获取ADK生成的invocation_id
+            adk_invocation_id = getattr(callback_context, 'invocation_id', None)
+            logger.info(f"From before_model_callback: adk_invocation_id={adk_invocation_id}")
+
+            if session_id and adk_invocation_id:
+                # 启动同步任务，根据session_id和author='user'查找最新用户消息进行更新
+                import asyncio
+                asyncio.create_task(_sync_manual_message_invocation_id(session_id, adk_invocation_id))
+            else:
+                logger.debug(f"Ignore invocation_id synchronization: session_id={session_id}, invocation_id={adk_invocation_id}")
+
+        except Exception as e:
+            logger.warning(f"Failed to start invocation_id synchronization (not affecting main flow): {e}")
+        
+        # 必须返回 None 让ADK继续正常执行
+        return None
+    
+    # 创建 Agent 对象（带回调）
     agent = LlmAgent(
         name=app_name,
         model=model,
-        instruction=agent_instruction
+        instruction=agent_instruction,
+        before_model_callback=before_model_callback  # 🔗 使用 before_model_callback
     )
 
     logger.info(f"Agent created successfully: {agent}")
@@ -540,10 +631,12 @@ async def make_adk_api_call(
             safe_url = DATABASE_URL.replace(parsed_url.password, "********")
         
         logger.info(f"Using DATABASE_URL for SessionService: {safe_url}")
-    
-        session_service = DatabaseSessionService(DATABASE_URL)
+
+        # session_service = DatabaseSessionService(DATABASE_URL)
+        session_service = ModelOnlyDBSessionService(DATABASE_URL)
         
-        # 如果 DatabaseSessionService 创建成功，获取或创建会话
+        
+        # 如果 ModelOnlyDBSessionService 创建成功，获取或创建会话
         try:
             # 先尝试获取现有会话
             existing_session = await session_service.get_session(
@@ -583,7 +676,7 @@ async def make_adk_api_call(
             elif "EOFError" in str(session_error) or "Ran out of input" in str(session_error):
                 try:
                     # 清理损坏的数据
-                    import asyncpg
+                    import asyncpg # type: ignore
                     conn = await asyncpg.connect(DATABASE_URL)
                     try:
                         await conn.execute("DELETE FROM events WHERE session_id = $1", session_id)
@@ -629,4 +722,4 @@ async def make_adk_api_call(
 
 
 # Initialize API keys on module import
-setup_api_keys()
+# setup_api_keys()

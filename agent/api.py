@@ -1537,10 +1537,14 @@ async def initiate_agent_with_files(
         await _create_adk_session_if_not_exists(client, user_id, adk_session_id)
         logger.info(f"Created ADK session successfully: {adk_session_id}")
 
-        # 使用ADK events表记录消息
+        # # 使用ADK events表记录消息 --- 需要删除
         message_id = str(uuid.uuid4())
         await _log_adk_user_message_event(client, user_id, message_content, adk_session_id, message_id)
         logger.info(f"User message event recorded successfully: {message_id}")
+        
+        # 🔗 设置手动消息ID到上下文中，供ADK回调使用
+        from services.llm import set_manual_message_id
+        set_manual_message_id(message_id)
 
         # 7. 确定最终使用的模型
         
@@ -1627,6 +1631,7 @@ async def initiate_agent_with_files(
                 is_agent_builder=is_agent_builder,
                 target_agent_id=target_agent_id,
                 request_id=request_id,
+                # manual_message_id=message_id,  # ✅ 不再需要，使用上下文变量传递
             )
             print(f"  ✅ Agent运行任务已发送到后台，消息ID: {message.message_id}")
             logger.info(f"  ✅ Agent运行任务已发送到后台，消息ID: {message.message_id}")
@@ -4223,11 +4228,10 @@ async def _log_adk_user_message_event(client, user_id: str, message_content: str
         event_id = str(uuid.uuid4())
         invocation_id = str(uuid.uuid4())
         
-        # 💡 保持原有格式以兼容前端
+        # ✅ 使用 ADK 标准格式（ADK 不接受 content 字段，只接受 parts）
         content = {
             "role": "user", 
-            "content": message_content,  # 保持简单格式，前端期望这个
-            "message_id": message_id
+            "parts": [{"text": message_content}]  # ADK 标准格式
         }
         
         # actions 需要手动序列化为字节（这是ADK的格式要求）
@@ -4273,8 +4277,7 @@ async def _log_adk_agent_response_event(client, user_id: str, response_content: 
         invocation_id = str(uuid.uuid4())
         
         # 构建回复内容
-        content = {
-            "role": "assistant",
+        content = {            "role": "assistant",
             "content": response_content,
             "model": model_name
         }
@@ -4312,13 +4315,47 @@ def _convert_adk_events_to_messages(events):
                 import json
                 content = json.loads(content)
             
-            # 转换为messages表格式
+            # ✅ 提取纯文本内容（前端期望格式）
+            message_text = ""
+            if isinstance(content, dict):
+                # ADK格式：{"role": "user", "parts": [{"text": "..."}]}
+                if 'parts' in content and isinstance(content['parts'], list):
+                    text_parts = []
+                    logger.debug(f"Processing {len(content['parts'])} parts for event {event.get('id', 'unknown')}")
+                    for i, part in enumerate(content['parts']):
+                        if isinstance(part, dict) and 'text' in part:
+                            part_text = part['text'].strip()
+                            logger.debug(f"Part {i}: {part_text[:100]}{'...' if len(part_text) > 100 else ''}")
+                            # 🔧 防止重复文本：只添加不重复的部分
+                            if part_text and part_text not in text_parts:
+                                text_parts.append(part_text)
+                            else:
+                                logger.warning(f"Skipped duplicate/empty part {i} in event {event.get('id', 'unknown')}")
+                    message_text = ' '.join(text_parts).strip()
+                    logger.debug(f"Final message_text length: {len(message_text)}")
+                # 旧格式：{"role": "user", "content": "..."}
+                elif 'content' in content:
+                    message_text = content['content']
+                # 其他格式：尝试转换为字符串
+                else:
+                    message_text = str(content)
+            else:
+                message_text = str(content)
+            
+            # ✅ 转换为messages表格式（前端兼容）
+            # 🔧 处理ADK的role映射：model -> assistant
+            content_role = content.get("role", event.get("author", "user"))
+            if content_role == "model":
+                message_type = "assistant"
+            else:
+                message_type = content_role
+                
             message = {
                 "message_id": content.get("message_id", event["id"]),
                 "thread_id": event["session_id"], 
-                "type": content.get("role", event.get("author", "user")),
+                "type": message_type,
                 "is_llm_message": True,
-                "content": content,
+                "content": message_text,  # ✅ 返回纯文本字符串，前端可以调用.match()
                 "created_at": event["timestamp"],
                 "author": event.get("author", "user"),
                 "event_id": event["id"]

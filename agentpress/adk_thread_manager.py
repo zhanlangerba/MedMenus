@@ -211,7 +211,7 @@ class ADKThreadManager:
                     
                 offset += batch_size
             
-            # 使用 all_events 而不是 result.data 在其余方法中
+            # 使用 all_events 而不是 result.data 
             result_data = all_events
 
             # 解析返回的数据，并转换为原始消息格式
@@ -250,13 +250,21 @@ class ADKThreadManager:
                     if message.get('timestamp') and hasattr(message['timestamp'], 'isoformat'):
                         message['timestamp'] = message['timestamp'].isoformat()
                     
-                    # 处理内容格式 - 保持与原始 messages 表格式一致
+                    # 处理内容格式 - 兼容原始格式和ADK格式
                     if isinstance(content, dict):
-                        # 如果content是对象，提取文本内容
-                        if 'content' in content:
+                        # 处理ADK格式 {"role": "user", "parts": [{"text": "..."}]}
+                        if 'parts' in content and isinstance(content['parts'], list):
+                            # 提取ADK parts中的文本内容
+                            text_parts = []
+                            for part in content['parts']:
+                                if isinstance(part, dict) and 'text' in part:
+                                    text_parts.append(part['text'])
+                            message["content"] = ' '.join(text_parts).strip()
+                        # 如果存在：处理原始格式 {"role": "user", "content": "..."}
+                        elif 'content' in content:
                             message["content"] = content['content']
                         else:
-                            # 如果没有content字段，将整个对象转为字符串
+                            # 如果都没有，将整个对象转为字符串（向后兼容）
                             message["content"] = json.dumps(content)
                     else:
                         message["content"] = str(content)
@@ -328,74 +336,74 @@ class ADKThreadManager:
         # 创建一个工作副本，以便可能修改
         working_system_prompt = system_prompt.copy()
 
-        # 如果请求，则添加 XML 工具调用指令到系统提示词
-        if include_xml_examples and config.xml_tool_calling:
-            openapi_schemas = self.tool_registry.get_openapi_schemas()
-            usage_examples = self.tool_registry.get_usage_examples()
+#         # 如果请求，则添加 XML 工具调用指令到系统提示词
+#         if include_xml_examples and config.xml_tool_calling:
+#             openapi_schemas = self.tool_registry.get_openapi_schemas()
+#             usage_examples = self.tool_registry.get_usage_examples()
             
-            if openapi_schemas:
-                # Convert schemas to JSON string
-                schemas_json = json.dumps(openapi_schemas, indent=2)
+#             if openapi_schemas:
+#                 # Convert schemas to JSON string
+#                 schemas_json = json.dumps(openapi_schemas, indent=2)
                 
-                # Build usage examples section if any exist
-                usage_examples_section = ""
-                if usage_examples:
-                    usage_examples_section = "\n\nUsage Examples:\n"
-                    for func_name, example in usage_examples.items():
-                        usage_examples_section += f"\n{func_name}:\n{example}\n"
+#                 # Build usage examples section if any exist
+#                 usage_examples_section = ""
+#                 if usage_examples:
+#                     usage_examples_section = "\n\nUsage Examples:\n"
+#                     for func_name, example in usage_examples.items():
+#                         usage_examples_section += f"\n{func_name}:\n{example}\n"
                 
-                examples_content = f"""
-In this environment you have access to a set of tools you can use to answer the user's question.
+#                 examples_content = f"""
+# In this environment you have access to a set of tools you can use to answer the user's question.
 
-You can invoke functions by writing a <function_calls> block like the following as part of your reply to the user:
+# You can invoke functions by writing a <function_calls> block like the following as part of your reply to the user:
 
-<function_calls>
-<invoke name="function_name">
-<parameter name="param_name">param_value</parameter>
-...
-</invoke>
-</function_calls>
+# <function_calls>
+# <invoke name="function_name">
+# <parameter name="param_name">param_value</parameter>
+# ...
+# </invoke>
+# </function_calls>
 
-String and scalar parameters should be specified as-is, while lists and objects should use JSON format.
+# String and scalar parameters should be specified as-is, while lists and objects should use JSON format.
 
-Here are the functions available in JSON Schema format:
+# Here are the functions available in JSON Schema format:
 
-```json
-{schemas_json}
-```
+# ```json
+# {schemas_json}
+# ```
 
-When using the tools:
-- Use the exact function names from the JSON schema above
-- Include all required parameters as specified in the schema
-- Format complex data (objects, arrays) as JSON strings within the parameter tags
-- Boolean values should be "true" or "false" (lowercase)
-{usage_examples_section}"""
+# When using the tools:
+# - Use the exact function names from the JSON schema above
+# - Include all required parameters as specified in the schema
+# - Format complex data (objects, arrays) as JSON strings within the parameter tags
+# - Boolean values should be "true" or "false" (lowercase)
+# {usage_examples_section}"""
 
-                # # Save examples content to a file
-                # try:
-                #     with open('xml_examples.txt', 'w') as f:
-                #         f.write(examples_content)
-                #     logger.debug("Saved XML examples to xml_examples.txt")
-                # except Exception as e:
-                #     logger.error(f"Failed to save XML examples to file: {e}")
+#                 # # Save examples content to a file
+#                 # try:
+#                 #     with open('xml_examples.txt', 'w') as f:
+#                 #         f.write(examples_content)
+#                 #     logger.debug("Saved XML examples to xml_examples.txt")
+#                 # except Exception as e:
+#                 #     logger.error(f"Failed to save XML examples to file: {e}")
 
-                system_content = working_system_prompt.get('content')
+#                 system_content = working_system_prompt.get('content')
 
-                if isinstance(system_content, str):
-                    working_system_prompt['content'] += examples_content
-                    logger.debug("Appended XML examples to string system prompt content.")
-                elif isinstance(system_content, list):
-                    appended = False
-                    for item in working_system_prompt['content']: # Modify the copy
-                        if isinstance(item, dict) and item.get('type') == 'text' and 'text' in item:
-                            item['text'] += examples_content
-                            logger.debug("Appended XML examples to the first text block in list system prompt content.")
-                            appended = True
-                            break
-                    if not appended:
-                        logger.warning("System prompt content is a list but no text block found to append XML examples.")
-                else:
-                    logger.warning(f"System prompt content is of unexpected type ({type(system_content)}), cannot add XML examples.")
+#                 if isinstance(system_content, str):
+#                     working_system_prompt['content'] += examples_content
+#                     logger.debug("Appended XML examples to string system prompt content.")
+#                 elif isinstance(system_content, list):
+#                     appended = False
+#                     for item in working_system_prompt['content']: # Modify the copy
+#                         if isinstance(item, dict) and item.get('type') == 'text' and 'text' in item:
+#                             item['text'] += examples_content
+#                             logger.debug("Appended XML examples to the first text block in list system prompt content.")
+#                             appended = True
+#                             break
+#                     if not appended:
+#                         logger.warning("System prompt content is a list but no text block found to append XML examples.")
+#                 else:
+#                     logger.warning(f"System prompt content is of unexpected type ({type(system_content)}), cannot add XML examples.")
 
         # 控制是否需要自动继续，因为工具调用完成原因
         # Control whether we need to auto-continue due to tool_calls finish reason
@@ -492,7 +500,7 @@ When using the tools:
                     #     )
 
                     from services.llm import make_adk_api_call
-
+                    logger.info(f"prepared_messages: {prepared_messages}")
                     # 将构建好的提示词实际发送到大模型中                    
                     llm_response = await make_adk_api_call(
                         prepared_messages, 
@@ -510,9 +518,9 @@ When using the tools:
                     logger.error(f"Failed to make LLM API call: {str(e)}", exc_info=True)
                     raise
 
-                # 6. Process LLM response using the ResponseProcessor
+                # 6. 这样开始处理ADK返回的异步生成器
                 if stream:
-                    logger.debug("Processing ADK streaming response")
+                    logger.info("Processing ADK streaming response")
 
                     from typing import AsyncGenerator, cast
                     
@@ -527,10 +535,10 @@ When using the tools:
                             auto_continue_count=auto_continue_count,
                             continuous_state=continuous_state
                         )
-                        print("✅ process_adk_streaming_response 调用成功")
+                        logger.info("process_adk_streaming_response called successfully")
                         return response_generator
                     except Exception as e:
-                        print(f"❌ process_adk_streaming_response 调用失败: {e}")
+                        logger.error(f"process_adk_streaming_response called failed: {e}")
                         import traceback
                         traceback.print_exc()
                         raise
@@ -568,6 +576,7 @@ When using the tools:
 
         # 定义一个包装器生成器，处理自动继续逻辑
         async def auto_continue_wrapper():
+            print("我先进入的auto_continue_wrapper")
             nonlocal auto_continue, auto_continue_count
 
             while auto_continue and (native_max_auto_continues == 0 or auto_continue_count < native_max_auto_continues):

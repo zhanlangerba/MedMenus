@@ -71,6 +71,7 @@ async def check_health(key: str):
     structlog.contextvars.clear_contextvars()
     await redis.set(key, "healthy", ex=redis.REDIS_KEY_TTL)
 
+
 @dramatiq.actor
 async def run_agent_background(
     agent_run_id: str,
@@ -86,6 +87,7 @@ async def run_agent_background(
     is_agent_builder: Optional[bool] = False,
     target_agent_id: Optional[str] = None,
     request_id: Optional[str] = None,
+    # manual_message_id: Optional[str] = None,  # ✅ 不再需要，使用上下文变量
 ):
     """Run the agent in the background using Redis for state."""
     if agent_config:
@@ -185,7 +187,7 @@ async def run_agent_background(
 
     # 使用已解析的模型名
     effective_model = model_name  # 现在传入的已经是解析后的最终模型名
-    logger.info(f"🚀 Using model: {effective_model} (thinking: {enable_thinking}, reasoning_effort: {reasoning_effort})")
+    logger.info(f"Using model: {effective_model} (thinking: {enable_thinking}, reasoning_effort: {reasoning_effort})")
     if agent_config:
         logger.info(f"Using custom agent: {agent_config.get('name', 'Unknown')}")
     else:
@@ -270,8 +272,7 @@ async def run_agent_background(
         # 初始化Agent生成器
         try:
             logger.info(f"Starting to call run_agent function")
-
-            # 这里开始执行Agent的逻辑
+            # 这里开始执行Agent的逻辑。注意：这里仅仅是创建生成器，并不执行
             agent_gen = run_agent(
                 thread_id=thread_id, 
                 project_id=project_id, 
@@ -285,11 +286,9 @@ async def run_agent_background(
                 is_agent_builder=is_agent_builder,
                 target_agent_id=target_agent_id,
             )
-            print(f"    ✅ run_agent函数调用成功，返回生成器对象")
-            print(f"  ✅ Agent生成器创建成功")
+            logger.info(f"Agent run {agent_run_id} started successfully")
+            
         except Exception as agent_error:
-            print(f"    ❌ run_agent函数调用失败: {agent_error}")
-            print(f"    📋 错误详情: {traceback.format_exc()}")
             logger.error(f"Failed to call run_agent: {agent_error}")
             raise agent_error
 
@@ -297,18 +296,11 @@ async def run_agent_background(
         error_message = None
         pending_redis_operations = []
 
-        print(f"  📊 初始状态: {final_status}")
-        print(f"  📝 错误消息: {error_message}")
-        print(f"  📋 待处理Redis操作: {len(pending_redis_operations)}")
-
-        print(f"🔄 ===== 开始处理Agent响应流 =====")
-        print(f"  📡 开始迭代agent_gen生成器...")
         response_count = 0
+
+        # 从这里开始真正执行：runner.run()
         async for response in agent_gen:
             response_count += 1
-            print(f"  📨 收到第 {response_count} 个响应:")
-            print(f"    📋 响应类型: {response.get('type', 'unknown')}")
-            print(f"    📝 响应内容: {str(response)[:200]}...")
             if stop_signal_received:
                 print(f"  🛑 收到停止信号，停止Agent运行")
                 logger.info(f"Agent run {agent_run_id} stopped by signal.")

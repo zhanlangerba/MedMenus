@@ -182,7 +182,6 @@ class ResponseProcessor:
                 # 回退逻辑：partial==False 且有 usage_metadata 时大概率为最终
                 return bool(getattr(e, "partial", None) is False and getattr(e, "usage_metadata", None) is not None)
 
-
         # 运行状态初始化 
         continuous_state = continuous_state or {}   # 保存跨轮次的状态信息
         accumulated_content = continuous_state.get('accumulated_content', "") # 累积的内容，在下一轮中作为上下文
@@ -220,73 +219,69 @@ class ResponseProcessor:
             "last_chunk_time": None
         }
 
-        print(
-            f"ADK Streaming Config: XML={config.xml_tool_calling}, "
-            f"Native={config.native_tool_calling}, Execute on stream={config.execute_on_stream}, "
-            f"Strategy={config.tool_execution_strategy}"
-        )
-
         # 重用 / 创建 thread_run_id：保持相同的运行ID，在ADK 中是 invocation_id
         thread_run_id = continuous_state.get('thread_run_id') or str(uuid.uuid4())
         continuous_state['thread_run_id'] = thread_run_id
         
-        print(f"thread_run_id: {thread_run_id}")
+        logger.info(f"Processing ADK streaming response with thread_run_id: {thread_run_id}")
 
         try:
             # 当前已执行的自动继续次数
             # 处理两种情况，1. finsh_reason=tool_calls 2. finsh_reason=length
             # 在ADK 中，则是：get_function_calls() / get_function_responses() event.is_final_response()
-            # """
-            # 用户: "帮我搜索最新的科技新闻并分析趋势"
-            # LLM: "我来帮你搜索最新科技新闻..." [finish_reason: tool_calls]
-            # 系统: 自动继续，执行工具调用
-            # LLM: "根据搜索结果，当前主要趋势包括..." [finish_reason: stop]
-            # """
-            # if auto_continue_count == 0:  
-            #     start_content = {"status_type": "thread_run_start", "thread_run_id": thread_run_id}
-            #     # TODO: 适配 ADK 的 start 事件
-            #     start_msg_obj = await self.add_message(
-            #         thread_id=thread_id, type="status", content=start_content,
-            #         is_llm_message=False, metadata={"thread_run_id": thread_run_id}
-            #     )
-            #     if start_msg_obj:
-            #         yield format_for_yield(start_msg_obj)
+            """
+            用户: "帮我搜索最新的科技新闻并分析趋势"
+            LLM: "我来帮你搜索最新科技新闻..." [finish_reason: tool_calls]
+            系统: 自动继续，执行工具调用
+            LLM: "根据搜索结果，当前主要趋势包括..." [finish_reason: stop]
+            """
+            if auto_continue_count == 0:  
+                start_content = {"status_type": "thread_run_start", "thread_run_id": thread_run_id}
+                # TODO: 适配 ADK 的 start 事件
+                start_msg_obj = await self.add_message(
+                    thread_id=thread_id, type="status", content=start_content,
+                    is_llm_message=False, metadata={"thread_run_id": thread_run_id}
+                )
+                logger.info(f"start_msg_obj: {start_msg_obj}")
+                if start_msg_obj:
+                    yield format_for_yield(start_msg_obj)
 
-            #     assist_start_content = {"status_type": "assistant_response_start"}
-            #     assist_start_msg_obj = await self.add_message(
-            #         thread_id=thread_id, type="status", content=assist_start_content,
-            #         is_llm_message=False, metadata={"thread_run_id": thread_run_id}
-            #     )
-            #     if assist_start_msg_obj:
-            #         yield format_for_yield(assist_start_msg_obj)
+                assist_start_content = {"status_type": "assistant_response_start"}
+                assist_start_msg_obj = await self.add_message(
+                    thread_id=thread_id, type="status", content=assist_start_content,
+                    is_llm_message=False, metadata={"thread_run_id": thread_run_id}
+                )
+                if assist_start_msg_obj:
+                    yield format_for_yield(assist_start_msg_obj)
 
             # 序列号计数器，用于为每个yield的消息块分配唯一的、连续的序号
-            # """
-            # 支持auto-continue的连续性
-            # 场景1：正常流式响应
-            # sequence: 0  -> "你好"
-            # sequence: 1  -> "，我是"
-            # sequence: 2  -> "AI助手"
-            # sequence: 3  -> "。"
+            """
+            支持auto-continue的连续性
+            场景1：正常流式响应
+            sequence: 0  -> "你好"
+            sequence: 1  -> "，我是"
+            sequence: 2  -> "AI助手"
+            sequence: 3  -> "。"
 
-            # 场景2：Auto-continue场景
-            # 第一轮：
-            # sequence: 0  -> "你好，我是AI助手"
-            # sequence: 1  -> "，我可以"
-            # [finish_reason: length, auto-continue]
+            场景2：Auto-continue场景
+            第一轮：
+            sequence: 0  -> "你好，我是AI助手"
+            sequence: 1  -> "，我可以"
+            [finish_reason: length, auto-continue]
 
-            # 第二轮（从sequence: 2开始）：
-            # sequence: 2  -> "帮你"
-            # sequence: 3  -> "回答问题"
-            # sequence: 4  -> "。"
+            第二轮（从sequence: 2开始）：
+            sequence: 2  -> "帮你"
+            sequence: 3  -> "回答问题"
+            sequence: 4  -> "。"
             
-            # """
+            """
             __sequence = continuous_state.get('sequence', 0)
-
             # 这里开始流式处理异步的Runner
             async for event in adk_response:
+                logger.info(f"Current Event：{event}")
                 # 获取当前执行的时间戳
                 now_ts = _now_ts()
+
                 # 如果first_chunk_time为空，则设置为当前时间
                 if streaming_metadata["first_chunk_time"] is None:
                     streaming_metadata["first_chunk_time"] = now_ts
@@ -312,6 +307,7 @@ class ResponseProcessor:
                 # 添加模型信息
                 streaming_metadata["model"] = llm_model
 
+                logger.info(f"streaming_metadata: {streaming_metadata}")
                 # 错误 & 截断探测
                 error_code = getattr(event, "error_code", None)
                 error_msg = getattr(event, "error_message", None)
@@ -325,7 +321,7 @@ class ResponseProcessor:
                 partial = getattr(event, "partial", None)
                 turn_complete = getattr(event, "turn_complete", None)
                 is_final = _event_is_final(event)
-
+                
                 # ADK 的动作（移交、升级、状态/工件 delta、鉴权请求等）
                 actions = getattr(event, "actions", None)
                 long_run_tools = list(getattr(event, "long_running_tool_ids", []) or [])
@@ -350,9 +346,17 @@ class ResponseProcessor:
 
                 # 用 _derive_chunk_status 来确定 finish_reason
                 finish_reason = _derive_chunk_status()
-                print(f"chunk_status: {finish_reason}")
+                logger.info(f"current chunk status: {finish_reason}")
 
-                
+                # 过滤ADK的最终完整chunk，避免重复
+                if (partial is False and 
+                    getattr(event, "content", None) and 
+                    getattr(event.content, "parts", None) and
+                    finish_reason == "final"):
+                    # 这是ADK的最终完整消息，跳过处理，避免重复
+                    logger.info(f"Skipping final complete ADK chunk to avoid duplication")
+                    continue
+
                 # 在 ADK 事件中提取文本块： Content.parts[*].text
                 content = getattr(event, "content", None)
                 chunk_text = ""  # 初始化 chunk_text
@@ -1116,7 +1120,7 @@ class ResponseProcessor:
                         accumulated_content += reasoning_content
 
                     # Process content chunk
-                    if delta and hasattr(delta, 'content') and delta.content:
+                    if delta and hasattr(delta, 'content') and delta.content and not handled_text:
                         chunk_content = delta.content
                         # print(chunk_content, end='', flush=True)
                         
@@ -1126,6 +1130,8 @@ class ResponseProcessor:
                         elif not isinstance(chunk_content, str):
                             chunk_content = str(chunk_content)
                         
+                        # 🔧 这是非ADK路径，但也要避免重复累积
+                        # 由于有handled_text保护，这里通常不会被ADK事件触发
                         accumulated_content += chunk_content
                         current_xml_content += chunk_content
 
@@ -1391,9 +1397,30 @@ class ResponseProcessor:
                                 })
                             except json.JSONDecodeError: continue
 
-                message_data = { # Dict to be saved in 'content'
-                    "role": "assistant", "content": accumulated_content,
-                    "tool_calls": complete_native_tool_calls or None
+                # 🔧 去除重复内容（防止streaming累积时重复）
+                def deduplicate_content(content: str) -> str:
+                    if not content:
+                        return content
+                    
+                    # 检查是否内容重复了（简单检测：前一半和后一半相同）
+                    content_len = len(content)
+                    if content_len > 10:  # 只对足够长的内容进行检测
+                        mid_point = content_len // 2
+                        first_half = content[:mid_point].strip()
+                        second_half = content[mid_point:].strip()
+                        
+                        # 如果前一半和后一半完全相同，说明重复了
+                        if first_half and first_half == second_half:
+                            logger.warning(f"Detected duplicate content, removing duplication")
+                            return first_half
+                    
+                    return content
+
+                deduplicated_content = deduplicate_content(accumulated_content)
+                
+                message_data = { # Dict to be saved in 'content' - ADK格式
+                    "role": "model",
+                    "parts": [{"text": deduplicated_content}]
                 }
 
                 last_assistant_message_object = await self._add_message_with_agent_info(
@@ -1795,7 +1822,7 @@ class ResponseProcessor:
 
 
             # --- SAVE and YIELD Final Assistant Message ---
-            message_data = {"role": "assistant", "content": content, "tool_calls": native_tool_calls_for_message or None}
+            message_data = {"role": "model", "parts": [{"text": content}]}
             assistant_message_object = await self._add_message_with_agent_info(
                 thread_id=thread_id, type="assistant", content=message_data,
                 is_llm_message=True, metadata={"thread_run_id": thread_run_id}

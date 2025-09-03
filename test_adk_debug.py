@@ -4,7 +4,11 @@ from google.adk.agents.run_config import RunConfig, StreamingMode # type: ignore
 from google.adk.models.lite_llm import LiteLlm # type: ignore
 from google.adk.agents import LlmAgent # type: ignore
 from google.adk.sessions import DatabaseSessionService # type: ignore
+from services.model_only_session_service import ModelOnlyDBSessionService
 from google.adk import Runner # type: ignore
+from google.adk.agents.callback_context import CallbackContext # type: ignore
+from google.adk.models import LlmRequest, LlmResponse # type: ignore
+from typing import Optional
 import asyncio
 
 
@@ -29,11 +33,36 @@ model = LiteLlm(
     api_key="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"
 )
 
-# 创建 Agent 对象
+# 定义回调函数来提取 invocation_id
+def before_model_callback(callback_context: CallbackContext, llm_request: LlmRequest) -> Optional[LlmResponse]:
+    """ADK回调：在LLM调用前获取invocation_id"""
+    try:
+        print(f"🔗 before_model_callback 被触发！！！")
+        print(f"🔗 CallbackContext 属性: {dir(callback_context)}")
+        
+        if hasattr(callback_context, 'invocation_id') and callback_context.invocation_id:
+            print(f"✅ 成功提取 invocation_id: {callback_context.invocation_id}")
+        else:
+            print(f"⚠️ 上下文中没有找到 invocation_id")
+            
+        # 打印更多上下文信息
+        if hasattr(callback_context, 'session_id'):
+            print(f"🔗 Session ID: {callback_context.session_id}")
+        if hasattr(callback_context, 'user_id'):
+            print(f"🔗 User ID: {callback_context.user_id}")
+            
+    except Exception as e:
+        print(f"⚠️ 回调函数执行出错: {e}")
+    
+    # ✅ 关键：必须返回 None 让ADK继续正常执行
+    return None
+
+# 创建 Agent 对象，添加回调
 agent = LlmAgent(
     name="fufanmanus",
     model=model,
-    instruction="你是我的AI助手，请根据用户的问题给出回答。"
+    instruction="你是我的AI助手，请根据用户的问题给出回答。",
+    before_model_callback=before_model_callback  # 🔗 添加回调
 )
 
 query = "你好，请你介绍一下你自己。"
@@ -43,11 +72,11 @@ content = types.Content(role='user', parts=[types.Part(text=query)])
 
 async def run_async():
     # 统一使用数据库中已存在的 session_id
-    USER_ID = "51511682-b40c-4371-ab76-fbe726c7c00a"
-    SESSION_ID = "e6a1640f-0743-4580-930f-cf08cae198e7"  # 使用数据库中实际存在的
+    USER_ID = "5b6cb69c-cb47-4178-82b5-d579e83e8ec7"
+    SESSION_ID = "f40753f1-f75f-474c-b357-dfd59b78d560"  # 使用数据库中实际存在的
     
     # 创建 SessionService 对象
-    session_service = DatabaseSessionService(DATABASE_URL)
+    session_service = ModelOnlyDBSessionService(DATABASE_URL)
     
     try:
         # 在异步函数中创建会话
@@ -111,12 +140,18 @@ async def run_async():
         session_service=session_service
     )
     
+    print(f"🚀 开始运行 ADK - User ID: {USER_ID}, Session ID: {SESSION_ID}")
+    
     # 异步运行 - 现在使用统一的 SESSION_ID
     async for event in runner.run_async(
         user_id=USER_ID,
         session_id=SESSION_ID,  # 🎯 修复：使用同一个 SESSION_ID
         new_message=content,
     ):
+        # 打印事件的 invocation_id（如果有的话）
+        if hasattr(event, 'invocation_id') and event.invocation_id:
+            print(f"📋 事件 invocation_id: {event.invocation_id}")
+            
         # 解析 ADK 事件，只显示关键信息
         if hasattr(event, 'content') and event.content:
             if hasattr(event.content, 'parts') and event.content.parts:
