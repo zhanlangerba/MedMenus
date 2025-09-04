@@ -2,6 +2,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Dict, List, Any, Optional
 from uuid import uuid4
+import json
 
 from services.supabase import DBConnection
 from utils.logger import logger
@@ -322,11 +323,11 @@ class InstallationService:
             'avatar': template.avatar,
             'avatar_color': template.avatar_color,
             'profile_image_url': template.profile_image_url,
-            'metadata': {
+            'metadata': json.dumps({
                 **template.metadata,
                 'created_from_template': template.template_id,
                 'template_name': template.name
-            },
+            }),
             'created_at': datetime.now(timezone.utc).isoformat(),
             'updated_at': datetime.now(timezone.utc).isoformat()
         }

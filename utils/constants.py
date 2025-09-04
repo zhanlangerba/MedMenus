@@ -1,7 +1,5 @@
 # Master model configuration - single source of truth
 MODELS = {
-    # Free tier models
-
     "anthropic/claude-sonnet-4-20250514": {
         "aliases": ["claude-sonnet-4"],
         "pricing": {
@@ -68,27 +66,35 @@ MODELS = {
         },
         "tier_availability": ["paid"]
     },
-    # "openai/gpt-4o": {
-    #     "aliases": ["gpt-4o"],
-    #     "pricing": {
-    #         "input_cost_per_million_tokens": 2.50,
-    #         "output_cost_per_million_tokens": 10.00
-    #     },
-    #     "tier_availability": ["paid"]
-    # },
-    # "openai/gpt-4.1": {
-    #     "aliases": ["gpt-4.1"],
-    #     "pricing": {
-    #         "input_cost_per_million_tokens": 15.00,
-    #         "output_cost_per_million_tokens": 60.00
-    #     },
-    #     "tier_availability": ["paid"]
-    # },
+    "openai/gpt-4o": {
+        "aliases": ["gpt-4o"],
+        "pricing": {
+            "input_cost_per_million_tokens": 2.50,
+            "output_cost_per_million_tokens": 10.00
+        },
+        "tier_availability": ["paid"]
+    },
+    "openai/gpt-4o-mini": {
+        "aliases": ["gpt-4o-mini"],
+        "pricing": {
+            "input_cost_per_million_tokens": 0.15,
+            "output_cost_per_million_tokens": 0.60
+        },
+        "tier_availability": ["free", "paid"]
+    },
+    "openai/gpt-4.1": {
+        "aliases": ["gpt-4.1"],
+        "pricing": {
+            "input_cost_per_million_tokens": 15.00,
+            "output_cost_per_million_tokens": 60.00
+        },
+        "tier_availability": ["paid"]
+    },
     "openai/gpt-5": {
         "aliases": ["gpt-5"],
         "pricing": {
-            "input_cost_per_million_tokens": 1.25,
-            "output_cost_per_million_tokens": 10.00
+            "input_cost_per_million_tokens": 10.00,
+            "output_cost_per_million_tokens": 30.00
         },
         "tier_availability": ["paid"]
     },
@@ -100,14 +106,22 @@ MODELS = {
         },
         "tier_availability": ["paid"]
     },
-    # "openai/gpt-4.1-mini": {
-    #     "aliases": ["gpt-4.1-mini"],
-    #     "pricing": {
-    #         "input_cost_per_million_tokens": 1.50,
-    #         "output_cost_per_million_tokens": 6.00
-    #     },
-    #     "tier_availability": ["paid"]
-    # },
+    "openai/gpt-4.1": {
+        "aliases": ["gpt-4.1"],
+        "pricing": {
+            "input_cost_per_million_tokens": 2.00,
+            "output_cost_per_million_tokens": 8.00
+        },
+        "tier_availability": ["paid"]
+    },
+    "openai/gpt-4.1-mini": {
+        "aliases": ["gpt-4.1-mini"],
+        "pricing": {
+            "input_cost_per_million_tokens": 0.40,
+            "output_cost_per_million_tokens": 1.60
+        },
+        "tier_availability": ["paid"]
+    },
     "anthropic/claude-3-7-sonnet-latest": {
         "aliases": ["sonnet-3.7"],
         "pricing": {

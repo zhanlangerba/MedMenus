@@ -3,7 +3,6 @@ from utils.logger import logger
 
 
 def extract_agent_config(agent_data: Dict[str, Any], version_data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    logger.info(f"extract_agent_config: {agent_data}")
     agent_id = agent_data.get('agent_id', 'Unknown')
 
     # 处理metadata字段，确保它是字典
@@ -17,14 +16,60 @@ def extract_agent_config(agent_data: Dict[str, Any], version_data: Optional[Dict
     else:
         metadata = metadata_raw if isinstance(metadata_raw, dict) else {}
     
-    is_suna_default = metadata.get('is_suna_default', False)
+    is_fufanmanus_default = metadata.get('is_fufanmanus_default', False)
     centrally_managed = metadata.get('centrally_managed', False)
     restrictions = metadata.get('restrictions', {})
     
-    # TODO：获取指定版本的 Agent
     if version_data:
-        pass
-        # return config
+        logger.info(f"Using active version data for agent {agent_id} (version: {version_data.get('version_name', 'unknown')})")
+        
+        model = None
+        workflows = []
+        if version_data.get('config'):
+            config = version_data['config'].copy()
+            system_prompt = config.get('system_prompt', '')
+            model = config.get('model')
+            tools = config.get('tools', {})
+            configured_mcps = tools.get('mcp', [])
+            custom_mcps = tools.get('custom_mcp', [])
+            agentpress_tools = tools.get('agentpress', {})
+            workflows = config.get('workflows', [])
+        else:
+            system_prompt = version_data.get('system_prompt', '')
+            model = version_data.get('model')
+            configured_mcps = version_data.get('configured_mcps', [])
+            custom_mcps = version_data.get('custom_mcps', [])
+            agentpress_tools = version_data.get('agentpress_tools', {})
+            workflows = []
+        
+        if is_fufanmanus_default:
+            from agent.fufanmanus.config import FufanmanusConfig
+            system_prompt = FufanmanusConfig.get_system_prompt()
+            agentpress_tools = FufanmanusConfig.DEFAULT_TOOLS
+        
+        config = {
+            'agent_id': agent_data['agent_id'],
+            'name': agent_data['name'],
+            'description': agent_data.get('description'),
+            'is_default': agent_data.get('is_default', False),
+            'account_id': agent_data.get('account_id') or agent_data.get('user_id'),
+            'current_version_id': agent_data.get('current_version_id'),
+            'version_name': version_data.get('version_name', 'v1'),
+            'system_prompt': system_prompt,
+            'model': model,
+            'configured_mcps': configured_mcps,
+            'custom_mcps': custom_mcps,
+            'agentpress_tools': _extract_agentpress_tools_for_run(agentpress_tools),
+            'workflows': workflows,
+            'avatar': agent_data.get('avatar'),
+            'avatar_color': agent_data.get('avatar_color'),
+            'profile_image_url': agent_data.get('profile_image_url'),
+            'is_fufanmanus_default': is_fufanmanus_default,
+            'centrally_managed': centrally_managed,
+            'restrictions': restrictions
+        }
+        
+        return config
     
     # 检查是否有直接的配置字段（agents表的设计）
     if agent_data.get('system_prompt') or agent_data.get('model'):
@@ -61,6 +106,13 @@ def extract_agent_config(agent_data: Dict[str, Any], version_data: Optional[Dict
         else:
             agentpress_tools = agentpress_tools_raw if isinstance(agentpress_tools_raw, dict) else {}
         
+        if is_fufanmanus_default:
+            from agent.fufanmanus.config import FufanmanusConfig
+            system_prompt = FufanmanusConfig.get_system_prompt()
+            agentpress_tools = FufanmanusConfig.DEFAULT_TOOLS
+        else:
+            system_prompt = agent_data.get('system_prompt', '')
+        
         config = {
             'agent_id': agent_data['agent_id'],
             'name': agent_data['name'],
@@ -69,7 +121,7 @@ def extract_agent_config(agent_data: Dict[str, Any], version_data: Optional[Dict
             'account_id': agent_data.get('account_id') or agent_data.get('user_id'),
             'current_version_id': agent_data.get('current_version_id'),
             'version_name': 'v1',
-            'system_prompt': agent_data.get('system_prompt', ''),
+            'system_prompt': system_prompt,
             'model': agent_data.get('model'),
             'configured_mcps': configured_mcps,
             'custom_mcps': custom_mcps,
@@ -78,24 +130,18 @@ def extract_agent_config(agent_data: Dict[str, Any], version_data: Optional[Dict
             'avatar': agent_data.get('avatar'),
             'avatar_color': agent_data.get('avatar_color'),
             'profile_image_url': agent_data.get('profile_image_url'),
-            'is_suna_default': is_suna_default,
+            'is_fufanmanus_default': is_fufanmanus_default,
             'centrally_managed': centrally_managed,
             'restrictions': restrictions
         }
         
-        if is_suna_default:
-            from agent.fufanmanus.config import FufanmanusConfig
-            config['system_prompt'] = FufanmanusConfig.get_system_prompt()
-            config['agentpress_tools'] = _extract_agentpress_tools_for_run(FufanmanusConfig.DEFAULT_TOOLS)
-        
         return config
     
-    # 兼容旧的config字段设计
     if agent_data.get('config'):
         logger.info(f"Using agent config for agent {agent_id}")
         config = agent_data['config'].copy()
         
-        if is_suna_default:
+        if is_fufanmanus_default:
             from agent.fufanmanus.config import FufanmanusConfig
             config['system_prompt'] = FufanmanusConfig.get_system_prompt()
             config['tools']['agentpress'] = FufanmanusConfig.DEFAULT_TOOLS
@@ -108,7 +154,7 @@ def extract_agent_config(agent_data: Dict[str, Any], version_data: Optional[Dict
             'account_id': agent_data.get('account_id') or agent_data.get('user_id'),
             'current_version_id': agent_data.get('current_version_id'),
             'model': config.get('model'),  # Include model from config
-            'is_suna_default': is_suna_default,
+            'is_fufanmanus_default': is_fufanmanus_default,
             'centrally_managed': centrally_managed,
             'restrictions': restrictions
         })
@@ -130,37 +176,6 @@ def extract_agent_config(agent_data: Dict[str, Any], version_data: Optional[Dict
     logger.warning(f"No config found for agent {agent_id}, creating default configuration")
     
     # Create minimal default configuration
-    # 处理JSON字段
-    configured_mcps_raw = agent_data.get('configured_mcps', [])
-    if isinstance(configured_mcps_raw, str):
-        try:
-            import json
-            configured_mcps = json.loads(configured_mcps_raw)
-        except (json.JSONDecodeError, TypeError):
-            configured_mcps = []
-    else:
-        configured_mcps = configured_mcps_raw if isinstance(configured_mcps_raw, list) else []
-    
-    custom_mcps_raw = agent_data.get('custom_mcps', [])
-    if isinstance(custom_mcps_raw, str):
-        try:
-            import json
-            custom_mcps = json.loads(custom_mcps_raw)
-        except (json.JSONDecodeError, TypeError):
-            custom_mcps = []
-    else:
-        custom_mcps = custom_mcps_raw if isinstance(custom_mcps_raw, list) else []
-    
-    agentpress_tools_raw = agent_data.get('agentpress_tools', {})
-    if isinstance(agentpress_tools_raw, str):
-        try:
-            import json
-            agentpress_tools = json.loads(agentpress_tools_raw)
-        except (json.JSONDecodeError, TypeError):
-            agentpress_tools = {}
-    else:
-        agentpress_tools = agentpress_tools_raw if isinstance(agentpress_tools_raw, dict) else {}
-    
     config = {
         'agent_id': agent_data['agent_id'],
         'name': agent_data.get('name', 'Unnamed Agent'),
@@ -169,16 +184,16 @@ def extract_agent_config(agent_data: Dict[str, Any], version_data: Optional[Dict
         'account_id': agent_data.get('account_id') or agent_data.get('user_id'),
         'current_version_id': agent_data.get('current_version_id'),
         'version_name': 'v1',
-        'system_prompt': agent_data.get('system_prompt', 'You are a helpful AI assistant.'),
-        'model': agent_data.get('model'),
-        'configured_mcps': configured_mcps,
-        'custom_mcps': custom_mcps,
-        'agentpress_tools': agentpress_tools,
+        'system_prompt': 'You are a helpful AI assistant.',
+        'model': None,  # No model specified for default config
+        'configured_mcps': [],
+        'custom_mcps': [],
+        'agentpress_tools': {},
         'workflows': [],
         'avatar': agent_data.get('avatar'),
         'avatar_color': agent_data.get('avatar_color'),
         'profile_image_url': agent_data.get('profile_image_url'),
-        'is_suna_default': is_suna_default,
+        'is_fufanmanus_default': is_fufanmanus_default,
         'centrally_managed': centrally_managed,
         'restrictions': restrictions
     }
@@ -193,7 +208,7 @@ def build_unified_config(
     custom_mcps: Optional[List[Dict[str, Any]]] = None,
     avatar: Optional[str] = None,
     avatar_color: Optional[str] = None,
-    suna_metadata: Optional[Dict[str, Any]] = None,
+    fufanmanus_metadata: Optional[Dict[str, Any]] = None,
     workflows: Optional[List[Dict[str, Any]]] = None
 ) -> Dict[str, Any]:
     simplified_tools = {}
@@ -217,8 +232,8 @@ def build_unified_config(
         }
     }
     
-    if suna_metadata:
-        config['suna_metadata'] = suna_metadata
+    if fufanmanus_metadata:
+        config['fufanmanus_metadata'] = fufanmanus_metadata
     
     return config
 
@@ -281,7 +296,7 @@ def get_mcp_configs(config: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 
 def is_fufanmanus_default_agent(config: Dict[str, Any]) -> bool:
-    return config.get('is_suna_default', False)
+    return config.get('is_fufanmanus_default', False)
 
 
 def get_agent_restrictions(config: Dict[str, Any]) -> Dict[str, bool]:
@@ -299,3 +314,5 @@ def can_edit_field(config: Dict[str, Any], field_name: str) -> bool:
 def get_default_system_prompt_for_fufanmanus_agent() -> str:
     from agent.fufanmanus.config import FufanmanusConfig
     return FufanmanusConfig.get_system_prompt()
+
+

@@ -1156,7 +1156,7 @@ async def initiate_agent_with_files(
     - user_id: 当前用户ID(从JWT中获取)
     """
 
-    # 1. 提取前端传递的参数
+    # 提取前端传递的参数
     logger.info(f"Starting new agent session with prompt: {prompt}")
     logger.info(f"Starting new agent session with model name: {model_name}")
 
@@ -1178,13 +1178,13 @@ async def initiate_agent_with_files(
         model_name = config.MODEL_TO_USE
         logger.info(f"No model name provided, using default model: {model_name}")
 
-    # 处理模型名称，使其适配 LiteLLM 的模型定义规范， 如 deepseek-r1 → deepseek/deepseek-r1  claude-4-sonnet → anthropic/claude-4-sonnet
+    logger.info(f"before model_name: {model_name}")
+    # 处理模型名称，使其适配 LiteLLM 的模型定义规范， 如 deepseek-r1 → deepseek/deepseek-r1  claude-4-sonnet → anthropic/claude-4-sonnet gpt-5 → openai/gpt-5
     resolved_model = MODEL_NAME_ALIASES.get(model_name, model_name)
     # 更新model_name为解析后的版本
     model_name = resolved_model
 
-
-    # 3. 初始化数据库连接
+    # 初始化数据库连接
     client = await db.client
     logger.info(f"Database connection successful, account_id: {user_id}")
     
@@ -1193,35 +1193,78 @@ async def initiate_agent_with_files(
     logger.info(f"Requested agent_id: {agent_id}")
 
     if agent_id:
-        # TODO ：自主创建 Agent 及配置管理（可以通过 agent_id 来加载默认的配置）
-        pass
+        # 加载自主创建 Agent 及配置管理（可以通过 agent_id 来加载自主创建的配置）
+        logger.info(f"[AGENT INITIATE] Querying for specific agent: {agent_id}")
+        # 获取 Agent 实例对象
+        agent_result = await client.table('agents').select('*').eq('agent_id', agent_id).eq('user_id', user_id).execute()
+        logger.info(f"[AGENT INITIATE] Query result: found {len(agent_result.data) if agent_result.data else 0} agents")
+        
+        if not agent_result.data:
+            raise HTTPException(status_code=404, detail="Agent not found or access denied")
+        
+        agent_data = agent_result.data[0]
+        logger.info(f"[AGENT INITIATE] Agent data: {agent_data}")
+        
+        # 使用版本管理系统获取当前版本
+        version_data = None
+        if agent_data.get('current_version_id'):
+            try:
+                version_service = await _get_version_service()
+                version_obj = await version_service.get_version(
+                    agent_id=agent_id,
+                    version_id=agent_data['current_version_id'],
+                    user_id=user_id
+                )
+                version_data = version_obj.to_dict()
+                logger.info(f"[AGENT INITIATE] Got version data from version manager: {version_data.get('version_name')}")
+                logger.info(f"[AGENT INITIATE] Version data: {version_data}")
+            except Exception as e:
+                logger.warning(f"[AGENT INITIATE] Failed to get version data: {e}")
+        
+        logger.info(f"[AGENT INITIATE] About to call extract_agent_config with version data: {version_data is not None}")
+        
+        agent_config = extract_agent_config(agent_data, version_data)
+        logger.info(f"agent_config: {agent_config}")
+        if version_data:
+            logger.info(f"Using custom agent: {agent_config['name']} ({agent_id}) version {agent_config.get('version_name', 'v1')}")
+        else:
+            logger.info(f"Using custom agent: {agent_config['name']} ({agent_id}) - no version data")
     else:
         logger.info(f"No agent_id provided, querying default agent")
-        # 从数据库中获取当前用户的默认Agent（系统自动创建统一的）
-        default_agent_result = await client.schema('public').table('agents').select('*').eq('user_id', user_id).eq('is_default', True).execute()
-        logger.info(f"Default agent query result: found {len(default_agent_result.data) if default_agent_result.data else 0} default agents")
+        # 优先查找FuFanManus默认Agent，如果没有再查找普通默认Agent
+        # 这里查找的逻辑是可以把自定义的Agent设置成默认，如果有，则加载指定的默认Agent
+        fufanmanus_agent_result = await client.table('agents').select('*').eq('user_id', user_id).eq("metadata->>'is_fufanmanus_default'", 'true').execute()
+        
+        if fufanmanus_agent_result.data:
+            logger.info(f"Found FuFanManus default agent: {len(fufanmanus_agent_result.data)} agents")
+            default_agent_result = fufanmanus_agent_result
+        else:
+            # 回退到普通默认Agent查询
+            logger.info(f"No FuFanManus agent found, querying regular default agent")
+            default_agent_result = await client.schema('public').table('agents').select('*').eq('user_id', user_id).eq('is_default', True).execute()
+            logger.info(f"Default agent query result: found {len(default_agent_result.data) if default_agent_result.data else 0} default agents")
         
         if default_agent_result.data:
             agent_data = default_agent_result.data[0]
             logger.info(f"Found default agent: {agent_data.get('name', 'Unknown')} (ID: {agent_data.get('agent_id')})")
             
-            # TODO：使用版本系统获取当前版本（可以做版本控制）
+            # 使用版本系统获取当前版本（做版本控制）
             version_data = None
-            # if agent_data.get('current_version_id'):
-            #     try:
-            #         logger.info(f"Get default agent version data: {agent_data['current_version_id']}")
-            #         version_service = await _get_version_service()
-            #         version_obj = await version_service.get_version(
-            #             agent_id=agent_data['agent_id'],
-            #             version_id=agent_data['current_version_id'],
-            #             user_id=user_id
-            #         )
-            #         version_data = version_obj.to_dict()
-            #         logger.info(f"Get default agent version data: {version_data.get('version_name')}")
-            #     except Exception as e:
-            #         logger.warning(f"Get default agent version data failed: {e}")
+            if agent_data.get('current_version_id'):
+                try:
+                    logger.info(f"Get default agent version data: {agent_data['current_version_id']}")
+                    version_service = await _get_version_service()
+                    version_obj = await version_service.get_version(
+                        agent_id=agent_data['agent_id'],
+                        version_id=agent_data['current_version_id'],
+                        user_id=user_id
+                    )
+                    version_data = version_obj.to_dict()
+                    logger.info(f"Get default agent version data: {version_data.get('version_name')}")
+                except Exception as e:
+                    logger.warning(f"Get default agent version data failed: {e}")
             
-            # logger.info(f"Prepare to call extract_agent_config for default agent, whether there is version data: {version_data is not None}")
+            logger.info(f"Prepare to call extract_agent_config for default agent, whether there is version data: {version_data is not None}")
             
             agent_config = extract_agent_config(agent_data, version_data)
             
@@ -1232,26 +1275,32 @@ async def initiate_agent_with_files(
         else:
             logger.warning(f"User {user_id} not found default agent")
             
-            # 自动创建默认Agent（兜底机制）
-            logger.info(f"Creating default agent for user {user_id}")
-            agent_id = await _create_default_agent_for_user(client, user_id)
-            
-            if agent_id:
-                # 重新查询刚创建的默认Agent
-                default_agent_result = await client.schema('public').table('agents').select('*').eq('user_id', user_id).eq('is_default', True).execute()
-                if default_agent_result.data:
-                    agent_data = default_agent_result.data[0]
-                    logger.info(f"Created default agent: {agent_data.get('name', 'Unknown')} (ID: {agent_data.get('agent_id')})")
-                    
-                    # 使用版本系统获取当前版本（暂时跳过）
-                    version_data = None
-                    agent_config = extract_agent_config(agent_data, version_data)
-                    
-                    logger.info(f"Using created default agent: {agent_config['name']} ({agent_config['agent_id']})")
+            # 自动创建FuFanManus默认Agent（兜底）
+            logger.info(f"1111111Creating FuFanManus default agent for user {user_id}")
+            try:
+                from agent.fufanmanus.repository import FufanmanusAgentRepository
+                repository = FufanmanusAgentRepository()
+                agent_id = await repository.create_fufanmanus_agent_simple(user_id)
+                
+                if agent_id:
+                    # 重新查询刚创建的默认Agent
+                    default_agent_result = await client.schema('public').table('agents').select('*').eq('user_id', user_id).eq('is_default', True).execute()
+                    if default_agent_result.data:
+                        agent_data = default_agent_result.data[0]
+                        logger.info(f"Created FuFanManus default agent: {agent_data.get('name', 'Unknown')} (ID: {agent_data.get('agent_id')})")
+                        
+                        # 使用版本系统获取当前版本（暂时跳过）
+                        version_data = None
+                        agent_config = extract_agent_config(agent_data, version_data)
+                        
+                        logger.info(f"Using created FuFanManus default agent: {agent_config['name']} ({agent_config['agent_id']})")
+                    else:
+                        logger.error(f"Failed to query created FuFanManus default agent")
                 else:
-                    logger.error(f"Failed to query created default agent")
-            else:
-                logger.error(f"Failed to create default agent")
+                    logger.error(f"FuFanManus repository returned no agent_id")
+            except Exception as e:
+                logger.error(f"Failed to create FuFanManus default agent: {e}")
+                # 可以考虑继续执行或抛出异常，根据业务需求决定
 
     if agent_config:
         logger.info(f"Agent config keys: {list(agent_config.keys())}")
@@ -1623,73 +1672,7 @@ async def initiate_agent_with_files(
         # TODO: Clean up created project/thread if initiation fails mid-way
         raise HTTPException(status_code=500, detail=f"Failed to initiate agent session: {str(e)}")
 
-async def _create_default_agent_for_user(client, user_id: str):
-    """为用户创建默认Agent（兜底机制）"""
-    try:
-        import uuid
-        from datetime import datetime
-        import json
-        
-        agent_id = str(uuid.uuid4())
-        
-        # 默认Agent配置
-        default_agent_data = {
-            'agent_id': agent_id,
-            'user_id': user_id,
-            'name': 'Default Assistant',
-            'description': '你的默认AI助手，可以帮助你完成各种任务',
-            'system_prompt': '你是一个智能助手，能够帮助用户解决各种问题。请以友好、专业的方式回答用户的问题。',
-            'model': 'deepseek/deepseek-chat-v3.1',
-            'configured_mcps': [],
-            'custom_mcps': [],
-            'agentpress_tools': {},
-            'is_default': True,
-            'is_public': False,
-            'tags': [],
-            'avatar': None,
-            'avatar_color': '#4F46E5',
-            'profile_image_url': None,
-            'current_version_id': None,
-            'version_count': 1,
-            'metadata': {
-                'created_by': 'system',
-                'auto_created': True,
-                'created_at_agent_initiate': True
-            },
-            'created_at': datetime.now(),
-            'updated_at': datetime.now()
-        }
-        
-        # 插入到agents表
-        async with client.pool.acquire() as conn:
-            await conn.execute(
-                """
-                INSERT INTO agents (
-                    agent_id, user_id, name, description, system_prompt, model,
-                    configured_mcps, custom_mcps, agentpress_tools, is_default, is_public,
-                    tags, avatar, avatar_color, profile_image_url, current_version_id,
-                    version_count, metadata, created_at, updated_at
-                ) VALUES (
-                    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20
-                )
-                """,
-                agent_id, user_id, default_agent_data['name'], default_agent_data['description'],
-                default_agent_data['system_prompt'], default_agent_data['model'],
-                json.dumps(default_agent_data['configured_mcps']), json.dumps(default_agent_data['custom_mcps']),
-                json.dumps(default_agent_data['agentpress_tools']), default_agent_data['is_default'],
-                default_agent_data['is_public'], default_agent_data['tags'], default_agent_data['avatar'],
-                default_agent_data['avatar_color'], default_agent_data['profile_image_url'],
-                default_agent_data['current_version_id'], default_agent_data['version_count'],
-                json.dumps(default_agent_data['metadata']), default_agent_data['created_at'],
-                default_agent_data['updated_at']
-            )
-        
-        logger.info(f"Auto-created default agent {agent_id} for user {user_id}")
-        return agent_id
-        
-    except Exception as e:
-        logger.error(f"Failed to auto-create default agent for user {user_id}: {e}")
-        return None
+
 
 # Custom agents
 @router.get("/agents", response_model=AgentsResponse)

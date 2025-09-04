@@ -2,6 +2,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Dict, List, Any, Optional
 from uuid import uuid4
+import json
 
 from services.supabase import DBConnection
 from utils.logger import logger
@@ -302,10 +303,10 @@ class JsonImportService:
             "is_default": False,
             "tags": json_data.get('tags', []),
             "version_count": 1,
-            "metadata": {
+            "metadata": json.dumps({
                 "imported_from_json": True,
                 "import_date": datetime.now(timezone.utc).isoformat()
-            }
+            })
         }
         
         result = await client.table('agents').insert(insert_data).execute()

@@ -1,12 +1,12 @@
 from .config_manager import FufanmanusConfigManager, FufanmanusConfiguration
-from .repository import SunaAgentRepository, SunaAgentRecord
+from .repository import FufanmanusAgentRepository, FufanmanusAgentRecord
 from .sync_service import SunaSyncService, SyncResult
 
 __all__ = [
     'FufanmanusConfigManager',
     'FufanmanusConfiguration',
-    'SunaAgentRepository',  
-    'SunaAgentRecord',
+    'FufanmanusAgentRepository',  
+    'FufanmanusAgentRecord',
     'SunaSyncService',
     'SyncResult'
 ] 

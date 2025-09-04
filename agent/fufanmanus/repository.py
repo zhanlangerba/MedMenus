@@ -1,25 +1,27 @@
 from typing import List, Dict, Any, Optional, Tuple
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import json
+import uuid
 from services.postgresql import DBConnection
 from utils.logger import logger
 
 
 @dataclass
-class SunaAgentRecord:
+class FufanmanusAgentRecord:
     agent_id: str
-    account_id: str
+    user_id: str
     name: str
     current_version_tag: str
     last_sync_date: str
     is_active: bool
     
     @classmethod
-    def from_db_row(cls, row: Dict[str, Any]) -> 'SunaAgentRecord':
+    def from_db_row(cls, row: Dict[str, Any]) -> 'FufanmanusAgentRecord':
         metadata = row.get('metadata', {})
         return cls(
             agent_id=row['agent_id'],
-            account_id=row['account_id'],
+            user_id=row['user_id'],
             name=row['name'],
             current_version_tag=metadata.get('config_version', 'unknown'),
             last_sync_date=metadata.get('last_central_update', ''),
@@ -27,11 +29,11 @@ class SunaAgentRecord:
         )
 
 
-class SunaAgentRepository:
+class FufanmanusAgentRepository:
     def __init__(self, db: DBConnection = None):
         self.db = db or DBConnection()
     
-    async def find_all_suna_agents(self) -> List[SunaAgentRecord]:
+    async def find_all_fufanmanus_agents(self) -> List[FufanmanusAgentRecord]:
         try:
             client = await self.db.client
             all_agents = []
@@ -40,13 +42,13 @@ class SunaAgentRepository:
             
             while True:
                 result = await client.table('agents').select(
-                    'agent_id, account_id, name, metadata'
-                ).eq('metadata->>is_suna_default', 'true').range(offset, offset + page_size - 1).execute()
+                    'agent_id, user_id, name, metadata'
+                ).eq('metadata->>is_fufanmanus_default', 'true').range(offset, offset + page_size - 1).execute()
                 
                 if not result.data:
                     break
                 
-                batch_agents = [SunaAgentRecord.from_db_row(row) for row in result.data]
+                batch_agents = [FufanmanusAgentRecord.from_db_row(row) for row in result.data]
                 all_agents.extend(batch_agents)
                 
                 # If we got less than page_size, we've reached the end
@@ -55,15 +57,15 @@ class SunaAgentRepository:
                 
                 offset += page_size
             
-            logger.info(f"Found {len(all_agents)} existing Suna agents")
+            logger.info(f"Found {len(all_agents)} existing FuFanManus agents")
             return all_agents
             
         except Exception as e:
-            logger.error(f"Failed to find Suna agents: {e}")
+            logger.error(f"Failed to find FuFanManus agents: {e}")
             raise
     
-    async def find_suna_agents_needing_sync(self, target_version_tag: str) -> List[SunaAgentRecord]:
-        agents = await self.find_all_suna_agents()
+    async def find_fufanmanus_agents_needing_sync(self, target_version_tag: str) -> List[FufanmanusAgentRecord]:
+        agents = await self.find_all_fufanmanus_agents()
         return [
             agent for agent in agents 
             if agent.current_version_tag != target_version_tag
@@ -115,14 +117,14 @@ class SunaAgentRepository:
                     'agentpress': {}
                 },
                 'metadata': {
-                    'is_suna_default': True,
+                    'is_fufanmanus_default': True,
                     'centrally_managed': True
                 }
             }
             
             update_data["config"] = preserved_unified_config
             
-            result = await client.table('agents').update(update_data).eq('agent_id', agent_id).execute()
+            result = await client.table('agents').update(update_data).eq('agent_id', agent_id)
             
             logger.info(f"Surgically updated agent {agent_id} - preserved MCPs and customizations")
             return bool(result.data)
@@ -136,7 +138,7 @@ class SunaAgentRepository:
             client = await self.db.client
             result = await client.table('agents').update({
                 'current_version_id': version_id
-            }).eq('agent_id', agent_id).execute()
+            }).eq('agent_id', agent_id)
             
             return bool(result.data)
             
@@ -150,11 +152,11 @@ class SunaAgentRepository:
             
             total_result = await client.table('agents').select(
                 'agent_id', count='exact'
-            ).eq('metadata->>is_suna_default', 'true').execute()
+            ).eq('metadata->>is_fufanmanus_default', 'true').execute()
             
             total_count = total_result.count or 0
             
-            agents = await self.find_all_suna_agents()
+            agents = await self.find_all_fufanmanus_agents()
             version_dist = {}
             for agent in agents:
                 version = agent.current_version_tag
@@ -170,9 +172,9 @@ class SunaAgentRepository:
             logger.error(f"Failed to get agent stats: {e}")
             return {"error": str(e)}
     
-    async def create_suna_agent_simple(
+    async def create_fufanmanus_agent_simple(
         self, 
-        account_id: str,
+        user_id: str,
     ) -> str:
         try:
             from agent.fufanmanus.config import FufanmanusConfig
@@ -180,28 +182,29 @@ class SunaAgentRepository:
             client = await self.db.client
             
             agent_data = {
-                "account_id": account_id,
+                "agent_id": str(uuid.uuid4()),
+                "user_id": user_id,
                 "name": FufanmanusConfig.NAME,
                 "description": FufanmanusConfig.DESCRIPTION,
                 "is_default": True,
                 "avatar": FufanmanusConfig.AVATAR,
                 "avatar_color": FufanmanusConfig.AVATAR_COLOR,
-                "metadata": {
+                "metadata": json.dumps({
                     "is_fufanmanus_default": True,
                     "centrally_managed": True,
                     "installation_date": datetime.now(timezone.utc).isoformat()
-                },
+                }),
                 "version_count": 1
             }
             
-            result = await client.table('agents').insert(agent_data).execute()
+            result = await client.table('agents').insert(agent_data)
             
             if result.data:
                 agent_id = result.data[0]['agent_id']
-                logger.info(f"Created minimal Suna agent {agent_id} for {account_id}")
+                logger.info(f"Created minimal FuFanManus agent {agent_id} for {user_id}")
                 await self._create_initial_version(
                     agent_id=agent_id,
-                    account_id=account_id,
+                    user_id=user_id,
                     system_prompt="[MANAGED]",
                                 model=FufanmanusConfig.DEFAULT_MODEL,
             configured_mcps=FufanmanusConfig.DEFAULT_MCPS,
@@ -213,7 +216,7 @@ class SunaAgentRepository:
             raise Exception("No data returned from insert")
             
         except Exception as e:
-            logger.error(f"Failed to create Suna agent for {account_id}: {e}")
+            logger.error(f"Failed to create FuFanManus agent for {user_id}: {e}")
             raise
     
     async def update_agent_metadata(
@@ -226,14 +229,14 @@ class SunaAgentRepository:
             
             update_data = {
                 "metadata": {
-                    "is_suna_default": True,
+                    "is_fufanmanus_default": True,
                     "centrally_managed": True,
                     "config_version": version_tag,
                     "last_central_update": datetime.now(timezone.utc).isoformat()
                 }
             }
             
-            result = await client.table('agents').update(update_data).eq('agent_id', agent_id).execute()
+            result = await client.table('agents').update(update_data).eq('agent_id', agent_id)
             
             return bool(result.data)
             
@@ -245,25 +248,25 @@ class SunaAgentRepository:
         """Delete an agent"""
         try:
             client = await self.db.client
-            result = await client.table('agents').delete().eq('agent_id', agent_id).execute()
+            result = await client.table('agents').delete().eq('agent_id', agent_id)
             return bool(result.data)
             
         except Exception as e:
             logger.error(f"Failed to delete agent {agent_id}: {e}")
             raise
     
-    async def find_orphaned_suna_agents(self) -> List[SunaAgentRecord]:
+    async def find_orphaned_fufanmanus_agents(self) -> List[FufanmanusAgentRecord]:
         """
-        Find Suna agents that exist but don't have proper version records.
+        Find FuFanManus agents that exist but don't have proper version records.
         These are agents that were created but the version creation process failed.
         """
         try:
             client = await self.db.client
             
-            # Get all Suna agents
+            # Get all FuFanManus agents
             agents_result = await client.table('agents').select(
-                'agent_id, account_id, name, metadata'
-            ).eq('metadata->>is_suna_default', 'true').execute()
+                'agent_id, user_id, name, metadata'
+            ).eq('metadata->>is_fufanmanus_default', 'true').execute()
             
             if not agents_result.data:
                 return []
@@ -276,19 +279,19 @@ class SunaAgentRepository:
             orphaned_agents = []
             for row in agents_result.data:
                 if row['agent_id'] not in agents_with_versions:
-                    orphaned_agents.append(SunaAgentRecord.from_db_row(row))
+                    orphaned_agents.append(FufanmanusAgentRecord.from_db_row(row))
             
-            logger.info(f"Found {len(orphaned_agents)} orphaned Suna agents")
+            logger.info(f"Found {len(orphaned_agents)} orphaned FuFanManus agents")
             return orphaned_agents
             
         except Exception as e:
-            logger.error(f"Failed to find orphaned Suna agents: {e}")
+            logger.error(f"Failed to find orphaned FuFanManus agents: {e}")
             raise
     
     async def create_version_record_for_existing_agent(
         self,
         agent_id: str,
-        account_id: str,
+        user_id: str,
         config_data: Dict[str, Any],
         unified_config: Dict[str, Any],
         version_tag: str
@@ -312,7 +315,7 @@ class SunaAgentRepository:
             version_service = await get_version_service()
             await version_service.create_version(
                 agent_id=agent_id,
-                user_id=account_id,
+                user_id=user_id,
                 system_prompt=system_prompt,
                 configured_mcps=configured_mcps,
                 custom_mcps=custom_mcps,
@@ -328,7 +331,7 @@ class SunaAgentRepository:
                 'metadata': {
                     **config_data.get('metadata', {})
                 }
-            }).eq('agent_id', agent_id).execute()
+            }).eq('agent_id', agent_id)
             
             logger.info(f"Created version record for orphaned agent {agent_id}")
             
@@ -373,7 +376,7 @@ class SunaAgentRepository:
     async def _create_initial_version(
         self,
         agent_id: str,
-        account_id: str,
+        user_id: str,
         system_prompt: str,
         model: str,
         configured_mcps: List[Dict[str, Any]],
@@ -386,18 +389,18 @@ class SunaAgentRepository:
             version_service = await get_version_service()
             await version_service.create_version(
                 agent_id=agent_id,
-                user_id=account_id,
+                user_id=user_id,
                 system_prompt=system_prompt,
                 configured_mcps=configured_mcps,
                 custom_mcps=custom_mcps,
                 agentpress_tools=agentpress_tools,
                 model=model,
                 version_name="v1",
-                change_description="Initial Suna agent version"
+                change_description="Initial FuFanManus agent version"
             )
             
-            logger.info(f"Created initial version for Suna agent {agent_id}")
+            logger.info(f"Created initial version for FuFanManus agent {agent_id}")
             
         except Exception as e:
-            logger.error(f"Failed to create initial version for Suna agent {agent_id}: {e}")
+            logger.error(f"Failed to create initial version for FuFanManus agent {agent_id}: {e}")
             raise
