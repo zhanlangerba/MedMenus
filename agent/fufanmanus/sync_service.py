@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from utils.logger import logger
 
-from .config_manager import SunaConfigManager, SunaConfiguration
+from .config_manager import FufanmanusConfigManager, FufanmanusConfiguration
 from .repository import SunaAgentRepository, SunaAgentRecord
 
 
@@ -24,7 +24,7 @@ class SyncResult:
 
 class SunaSyncService:
     def __init__(self):
-        self.config_manager = SunaConfigManager()
+        self.config_manager = FufanmanusConfigManager()
         self.repository = SunaAgentRepository()
     
     async def sync_all_agents(self, dry_run: bool = False) -> SyncResult:

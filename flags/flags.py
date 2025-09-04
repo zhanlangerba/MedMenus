@@ -179,7 +179,7 @@ async def get_flag_details(key: str) -> Optional[Dict[str, str]]:
 fufanmanus_default_agent = True
 
 # Custom agents feature flag
-custom_agents = False
+custom_agents = True
 
 # MCP module feature flag  
 mcp_module = False

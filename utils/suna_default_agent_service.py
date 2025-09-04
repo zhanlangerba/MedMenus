@@ -1,7 +1,7 @@
 from typing import Dict, Any, Optional
 from utils.logger import logger
-from services.supabase import DBConnection
-from agent.suna import SunaSyncService
+from services.postgresql import DBConnection
+from agent.fufanmanus import SunaSyncService
 
 
 class SunaDefaultAgentService:

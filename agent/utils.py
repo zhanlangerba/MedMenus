@@ -142,12 +142,12 @@ async def check_agent_run_limit(client, account_id: str) -> Dict[str, Any]:
 
 async def check_agent_count_limit(client, account_id: str) -> Dict[str, Any]:
     try:
-        # In local mode, allow practically unlimited custom agents
+        # 在本地模式下，允许创建几乎无限的定制Agent
         if config.ENV_MODE.value == "local":
             return {
                 'can_create': True,
-                'current_count': 0,  # Return 0 to avoid showing any limit warnings
-                'limit': 999999,     # Practically unlimited
+                'current_count': 0,  # 返回 0 以避免显示任何限制警告
+                'limit': 999999,     # 实际上无限
                 'tier_name': 'local'
             }
         
@@ -159,35 +159,27 @@ async def check_agent_count_limit(client, account_id: str) -> Dict[str, Any]:
         except Exception as cache_error:
             logger.warning(f"Cache read failed for agent count limit {account_id}: {str(cache_error)}")
 
-        agents_result = await client.table('agents').select('agent_id, metadata').eq('account_id', account_id).execute()
+        # 提取 Agent 信息
+        agents_result = await client.table('agents').select('agent_id, metadata').eq('user_id', account_id).execute()
         
-        non_suna_agents = []
+        non_fufanmanus_agents = []
         for agent in agents_result.data or []:
             metadata = agent.get('metadata', {}) or {}
-            is_suna_default = metadata.get('is_suna_default', False)
-            if not is_suna_default:
-                non_suna_agents.append(agent)
+            is_fufanmanus_default = metadata.get('is_fufanmanus_default', False)
+            if not is_fufanmanus_default:
+                non_fufanmanus_agents.append(agent)
                 
-        current_count = len(non_suna_agents)
-        logger.debug(f"Account {account_id} has {current_count} custom agents (excluding Suna defaults)")
+        current_count = len(non_fufanmanus_agents)
+        logger.debug(f"Account {account_id} has {current_count} custom agents (excluding Fufanmanus defaults)")
         
-        try:
-            from services.billing import get_subscription_tier
-            tier_name = await get_subscription_tier(client, account_id)
-            logger.debug(f"Account {account_id} subscription tier: {tier_name}")
-        except Exception as billing_error:
-            logger.warning(f"Could not get subscription tier for {account_id}: {str(billing_error)}, defaulting to free")
-            tier_name = 'free'
-        
-        agent_limit = config.AGENT_LIMITS.get(tier_name, config.AGENT_LIMITS['free'])
-        
-        can_create = current_count < agent_limit
-        
+
+        # TODO: 可以根据消费金额、用户授权等做Agent的创建限制
+        # 这里不做限制，允许任意用户无限制访问
         result = {
-            'can_create': can_create,
+            'can_create': True,
             'current_count': current_count,
-            'limit': agent_limit,
-            'tier_name': tier_name
+            'limit': 999999,
+            'tier_name': "free"
         }
         
         try:
@@ -195,7 +187,7 @@ async def check_agent_count_limit(client, account_id: str) -> Dict[str, Any]:
         except Exception as cache_error:
             logger.warning(f"Cache write failed for agent count limit {account_id}: {str(cache_error)}")
         
-        logger.info(f"Account {account_id} has {current_count}/{agent_limit} agents (tier: {tier_name}) - can_create: {can_create}")
+        logger.info(f"Account {account_id} has {current_count}/{999999} agents (tier: free) - can_create: {True}")
         
         return result
         
@@ -204,6 +196,6 @@ async def check_agent_count_limit(client, account_id: str) -> Dict[str, Any]:
         return {
             'can_create': True,
             'current_count': 0,
-            'limit': config.AGENT_LIMITS['free'],
+            'limit': 999999,
             'tier_name': 'free'
         }

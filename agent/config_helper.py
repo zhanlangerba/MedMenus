@@ -3,6 +3,7 @@ from utils.logger import logger
 
 
 def extract_agent_config(agent_data: Dict[str, Any], version_data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    logger.info(f"extract_agent_config: {agent_data}")
     agent_id = agent_data.get('agent_id', 'Unknown')
 
     # 处理metadata字段，确保它是字典
@@ -20,56 +21,10 @@ def extract_agent_config(agent_data: Dict[str, Any], version_data: Optional[Dict
     centrally_managed = metadata.get('centrally_managed', False)
     restrictions = metadata.get('restrictions', {})
     
+    # TODO：获取指定版本的 Agent
     if version_data:
-        logger.info(f"Using active version data for agent {agent_id} (version: {version_data.get('version_name', 'unknown')})")
-        
-        model = None
-        workflows = []
-        if version_data.get('config'):
-            config = version_data['config'].copy()
-            system_prompt = config.get('system_prompt', '')
-            model = config.get('model')
-            tools = config.get('tools', {})
-            configured_mcps = tools.get('mcp', [])
-            custom_mcps = tools.get('custom_mcp', [])
-            agentpress_tools = tools.get('agentpress', {})
-            workflows = config.get('workflows', [])
-        else:
-            system_prompt = version_data.get('system_prompt', '')
-            model = version_data.get('model')
-            configured_mcps = version_data.get('configured_mcps', [])
-            custom_mcps = version_data.get('custom_mcps', [])
-            agentpress_tools = version_data.get('agentpress_tools', {})
-            workflows = []
-        
-        if is_suna_default:
-            from agent.suna.config import SunaConfig
-            system_prompt = SunaConfig.get_system_prompt()
-            agentpress_tools = SunaConfig.DEFAULT_TOOLS
-        
-        config = {
-            'agent_id': agent_data['agent_id'],
-            'name': agent_data['name'],
-            'description': agent_data.get('description'),
-            'is_default': agent_data.get('is_default', False),
-            'account_id': agent_data.get('user_id'),  # 映射user_id到account_id
-            'current_version_id': agent_data.get('current_version_id'),
-            'version_name': version_data.get('version_name', 'v1'),
-            'system_prompt': system_prompt,
-            'model': model,
-            'configured_mcps': configured_mcps,
-            'custom_mcps': custom_mcps,
-            'agentpress_tools': _extract_agentpress_tools_for_run(agentpress_tools),
-            'workflows': workflows,
-            'avatar': agent_data.get('avatar'),
-            'avatar_color': agent_data.get('avatar_color'),
-            'profile_image_url': agent_data.get('profile_image_url'),
-            'is_suna_default': is_suna_default,
-            'centrally_managed': centrally_managed,
-            'restrictions': restrictions
-        }
-        
-        return config
+        pass
+        # return config
     
     # 检查是否有直接的配置字段（agents表的设计）
     if agent_data.get('system_prompt') or agent_data.get('model'):
@@ -111,7 +66,7 @@ def extract_agent_config(agent_data: Dict[str, Any], version_data: Optional[Dict
             'name': agent_data['name'],
             'description': agent_data.get('description'),
             'is_default': agent_data.get('is_default', False),
-            'account_id': agent_data.get('user_id'),  # 映射user_id到account_id
+            'account_id': agent_data.get('account_id') or agent_data.get('user_id'),
             'current_version_id': agent_data.get('current_version_id'),
             'version_name': 'v1',
             'system_prompt': agent_data.get('system_prompt', ''),
@@ -129,9 +84,9 @@ def extract_agent_config(agent_data: Dict[str, Any], version_data: Optional[Dict
         }
         
         if is_suna_default:
-            from agent.suna.config import SunaConfig
-            config['system_prompt'] = SunaConfig.get_system_prompt()
-            config['agentpress_tools'] = _extract_agentpress_tools_for_run(SunaConfig.DEFAULT_TOOLS)
+            from agent.fufanmanus.config import FufanmanusConfig
+            config['system_prompt'] = FufanmanusConfig.get_system_prompt()
+            config['agentpress_tools'] = _extract_agentpress_tools_for_run(FufanmanusConfig.DEFAULT_TOOLS)
         
         return config
     
@@ -141,16 +96,16 @@ def extract_agent_config(agent_data: Dict[str, Any], version_data: Optional[Dict
         config = agent_data['config'].copy()
         
         if is_suna_default:
-            from agent.suna.config import SunaConfig
-            config['system_prompt'] = SunaConfig.get_system_prompt()
-            config['tools']['agentpress'] = SunaConfig.DEFAULT_TOOLS
+            from agent.fufanmanus.config import FufanmanusConfig
+            config['system_prompt'] = FufanmanusConfig.get_system_prompt()
+            config['tools']['agentpress'] = FufanmanusConfig.DEFAULT_TOOLS
         
         config.update({
             'agent_id': agent_data['agent_id'],
             'name': agent_data['name'],
             'description': agent_data.get('description'),
             'is_default': agent_data.get('is_default', False),
-            'account_id': agent_data.get('user_id'),  # 映射user_id到account_id
+            'account_id': agent_data.get('account_id') or agent_data.get('user_id'),
             'current_version_id': agent_data.get('current_version_id'),
             'model': config.get('model'),  # Include model from config
             'is_suna_default': is_suna_default,
@@ -211,7 +166,7 @@ def extract_agent_config(agent_data: Dict[str, Any], version_data: Optional[Dict
         'name': agent_data.get('name', 'Unnamed Agent'),
         'description': agent_data.get('description', ''),
         'is_default': agent_data.get('is_default', False),
-        'account_id': agent_data.get('user_id'),  # 映射user_id到account_id
+        'account_id': agent_data.get('account_id') or agent_data.get('user_id'),
         'current_version_id': agent_data.get('current_version_id'),
         'version_name': 'v1',
         'system_prompt': agent_data.get('system_prompt', 'You are a helpful AI assistant.'),
@@ -341,6 +296,6 @@ def can_edit_field(config: Dict[str, Any], field_name: str) -> bool:
     return restrictions.get(field_name, True)
 
 
-def get_default_system_prompt_for_suna_agent() -> str:
-    from agent.suna.config import SunaConfig
-    return SunaConfig.get_system_prompt()
+def get_default_system_prompt_for_fufanmanus_agent() -> str:
+    from agent.fufanmanus.config import FufanmanusConfig
+    return FufanmanusConfig.get_system_prompt()

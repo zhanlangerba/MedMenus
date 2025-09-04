@@ -34,7 +34,7 @@ from .config_helper import extract_agent_config, build_unified_config, extract_t
 # Helper for version service
 # async def _get_version_service():
 #     return await get_version_service()
-# from utils.fufanmanus_default_agent_service import SunaDefaultAgentService
+# from utils.fufanmanus_default_agent_service import FufanmanusDefaultAgentService
 # from .tools.sb_presentation_tool_v2 import SandboxPresentationToolV2
 
 router = APIRouter()
@@ -45,7 +45,6 @@ instance_id = None # Global instance ID for this backend instance
 
 # TTL for Redis response lists (24 hours)
 REDIS_RESPONSE_LIST_TTL = 3600 * 24
-
 
 
 class AgentStartRequest(BaseModel):
@@ -72,15 +71,14 @@ class MessageCreateRequest(BaseModel):
 class AgentCreateRequest(BaseModel):
     name: str
     description: Optional[str] = None
-    system_prompt: Optional[str] = None  # Make optional to allow defaulting to Suna's system prompt
+    system_prompt: Optional[str] = None  # 确保系统提示词是可选的，允许默认使用 FuFanManus 的系统提示词
+    model: Optional[str] = None  # 确保模型是可选的
     configured_mcps: Optional[List[Dict[str, Any]]] = []
     custom_mcps: Optional[List[Dict[str, Any]]] = []
     agentpress_tools: Optional[Dict[str, Any]] = {}
     is_default: Optional[bool] = False
-    # Deprecated, kept for backward-compat
     avatar: Optional[str] = None
     avatar_color: Optional[str] = None
-    # New profile image url (can be external or Supabase storage URL)
     profile_image_url: Optional[str] = None
 
 class AgentVersionResponse(BaseModel):
@@ -130,10 +128,8 @@ class AgentResponse(BaseModel):
     custom_mcps: List[Dict[str, Any]]
     agentpress_tools: Dict[str, Any]
     is_default: bool
-    # Deprecated
     avatar: Optional[str] = None
     avatar_color: Optional[str] = None
-    # New
     profile_image_url: Optional[str] = None
     created_at: str
     updated_at: Optional[str] = None
@@ -183,6 +179,11 @@ class AgentImportRequest(BaseModel):
     """Request to import an agent from JSON"""
     import_data: AgentExportData
     import_as_new: bool = True  # Always true, only creating new agents is supported
+
+# Helper for version service
+async def _get_version_service():
+    from .versioning.version_service import get_version_service
+    return await get_version_service()
 
 def initialize(
     _db: DBConnection,
@@ -321,7 +322,6 @@ async def get_agent_run_with_access_check(client, agent_run_id: str, user_id: st
     await verify_thread_access(client, thread_id, user_id)
     return agent_run_data
 
-
 @router.post("/thread/{thread_id}/agent/start")
 async def start_agent(
     thread_id: str,
@@ -332,11 +332,14 @@ async def start_agent(
     structlog.contextvars.bind_contextvars(
         thread_id=thread_id,
     )
-    global instance_id # Ensure instance_id is accessible
+
+    logger.info(f"Starting continue chat with exsting thread: {thread_id}")
+
+    global instance_id 
     if not instance_id:
         raise HTTPException(status_code=500, detail="Agent API not initialized with instance ID")
 
-    # Use model from config if not specified in the request
+    # 使用配置中的模型，如果请求中没有指定
     model_name = body.model_name
     logger.info(f"Original model_name from request: {model_name}")
 
@@ -344,25 +347,33 @@ async def start_agent(
         model_name = config.MODEL_TO_USE
         logger.info(f"Using model from config: {model_name}")
 
-    # Log the model name after alias resolution
+    # 获取模型别名
     resolved_model = MODEL_NAME_ALIASES.get(model_name, model_name)
     logger.info(f"Resolved model name: {resolved_model}")
 
-    # Update model_name to use the resolved version
+    # 根据别名更新模型名称
     model_name = resolved_model
 
     logger.info(f"Starting new agent for thread: {thread_id} with config: model={model_name}, thinking={body.enable_thinking}, effort={body.reasoning_effort}, stream={body.stream}, context_manager={body.enable_context_manager} (Instance: {instance_id})")
+    
+    # 获取数据库连接
     client = await db.client
 
-
-    thread_result = await client.table('threads').select('project_id', 'account_id', 'metadata').eq('thread_id', thread_id).execute()
-
+    # 获取线程信息
+    thread_result = await client.table('threads').select('project_id, account_id, metadata').eq('thread_id', thread_id).execute()
+    logger.info(f"Thread result: {thread_result}")
     if not thread_result.data:
         raise HTTPException(status_code=404, detail="Thread not found")
+    
     thread_data = thread_result.data[0]
     project_id = thread_data.get('project_id')
     account_id = thread_data.get('account_id')
     thread_metadata = thread_data.get('metadata', {})
+
+    logger.info(f"Thread data: {thread_data}")
+    logger.info(f"Project ID: {project_id}")
+    logger.info(f"Account ID: {account_id}")
+    logger.info(f"Thread metadata: {thread_metadata}")
 
     if account_id != user_id:
         await verify_thread_access(client, thread_id, user_id)
@@ -373,148 +384,148 @@ async def start_agent(
         thread_metadata=thread_metadata,
     )
     
-    # Check if this is an agent builder thread
-    is_agent_builder = thread_metadata.get('is_agent_builder', False)
-    target_agent_id = thread_metadata.get('target_agent_id')
+    # # Check if this is an agent builder thread
+    # is_agent_builder = thread_metadata.get('is_agent_builder', False)
+    # target_agent_id = thread_metadata.get('target_agent_id')
     
-    if is_agent_builder:
-        logger.info(f"Thread {thread_id} is in agent builder mode, target_agent_id: {target_agent_id}")
+    # if is_agent_builder:
+    #     logger.info(f"Thread {thread_id} is in agent builder mode, target_agent_id: {target_agent_id}")
     
     # Load agent configuration with version support
     agent_config = None
-    effective_agent_id = body.agent_id  # Optional agent ID from request
+    # effective_agent_id = body.agent_id  # Optional agent ID from request
     
-    logger.info(f"[AGENT LOAD] Agent loading flow:")
-    logger.info(f"  - body.agent_id: {body.agent_id}")
-    logger.info(f"  - effective_agent_id: {effective_agent_id}")
+    # logger.info(f"[AGENT LOAD] Agent loading flow:")
+    # logger.info(f"  - body.agent_id: {body.agent_id}")
+    # logger.info(f"  - effective_agent_id: {effective_agent_id}")
 
-    if effective_agent_id:
-        logger.info(f"[AGENT LOAD] Querying for agent: {effective_agent_id}")
-        # Get agent
-        agent_result = await client.table('agents').select('*').eq('agent_id', effective_agent_id).eq('account_id', account_id).execute()
-        logger.info(f"[AGENT LOAD] Query result: found {len(agent_result.data) if agent_result.data else 0} agents")
+    # if effective_agent_id:
+    #     logger.info(f"[AGENT LOAD] Querying for agent: {effective_agent_id}")
+    #     # Get agent
+    #     agent_result = await client.table('agents').select('*').eq('agent_id', effective_agent_id).eq('account_id', account_id).execute()
+    #     logger.info(f"[AGENT LOAD] Query result: found {len(agent_result.data) if agent_result.data else 0} agents")
         
-        if not agent_result.data:
-            if body.agent_id:
-                raise HTTPException(status_code=404, detail="Agent not found or access denied")
-            else:
-                logger.warning(f"Stored agent_id {effective_agent_id} not found, falling back to default")
-                effective_agent_id = None
-        else:
-            agent_data = agent_result.data[0]
-            version_data = None
-            if agent_data.get('current_version_id'):
-                try:
-                    version_service = await _get_version_service()
-                    version_obj = await version_service.get_version(
-                        agent_id=effective_agent_id,
-                        version_id=agent_data['current_version_id'],
-                        user_id=user_id
-                    )
-                    version_data = version_obj.to_dict()
-                    logger.info(f"[AGENT LOAD] Got version data from version manager: {version_data.get('version_name')}")
-                except Exception as e:
-                    logger.warning(f"[AGENT LOAD] Failed to get version data: {e}")
+    #     if not agent_result.data:
+    #         if body.agent_id:
+    #             raise HTTPException(status_code=404, detail="Agent not found or access denied")
+    #         else:
+    #             logger.warning(f"Stored agent_id {effective_agent_id} not found, falling back to default")
+    #             effective_agent_id = None
+    #     else:
+    #         agent_data = agent_result.data[0]
+    #         version_data = None
+    #         if agent_data.get('current_version_id'):
+    #             try:
+    #                 version_service = await _get_version_service()
+    #                 version_obj = await version_service.get_version(
+    #                     agent_id=effective_agent_id,
+    #                     version_id=agent_data['current_version_id'],
+    #                     user_id=user_id
+    #                 )
+    #                 version_data = version_obj.to_dict()
+    #                 logger.info(f"[AGENT LOAD] Got version data from version manager: {version_data.get('version_name')}")
+    #             except Exception as e:
+    #                 logger.warning(f"[AGENT LOAD] Failed to get version data: {e}")
             
-            logger.info(f"[AGENT LOAD] About to call extract_agent_config with agent_data keys: {list(agent_data.keys())}")
-            logger.info(f"[AGENT LOAD] version_data type: {type(version_data)}, has data: {version_data is not None}")
+    #         logger.info(f"[AGENT LOAD] About to call extract_agent_config with agent_data keys: {list(agent_data.keys())}")
+    #         logger.info(f"[AGENT LOAD] version_data type: {type(version_data)}, has data: {version_data is not None}")
             
-            agent_config = extract_agent_config(agent_data, version_data)
+    #         agent_config = extract_agent_config(agent_data, version_data)
             
-            if version_data:
-                logger.info(f"Using agent {agent_config['name']} ({effective_agent_id}) version {agent_config.get('version_name', 'v1')}")
-            else:
-                logger.info(f"Using agent {agent_config['name']} ({effective_agent_id}) - no version data")
-            source = "request" if body.agent_id else "fallback"
-    else:
-        logger.info(f"[AGENT LOAD] No effective_agent_id, will try default agent")
+    #         if version_data:
+    #             logger.info(f"Using agent {agent_config['name']} ({effective_agent_id}) version {agent_config.get('version_name', 'v1')}")
+    #         else:
+    #             logger.info(f"Using agent {agent_config['name']} ({effective_agent_id}) - no version data")
+    #         source = "request" if body.agent_id else "fallback"
+    # else:
+    #     logger.info(f"[AGENT LOAD] No effective_agent_id, will try default agent")
 
-    if not agent_config:
-        logger.info(f"[AGENT LOAD] No agent config yet, querying for default agent")
-        default_agent_result = await client.schema('public').table('agents').select('*').eq('user_id', user_id).eq('is_default', True).execute()
-        logger.info(f"[AGENT LOAD] Default agent query result: found {len(default_agent_result.data) if default_agent_result.data else 0} default agents")
+    # if not agent_config:
+    #     logger.info(f"[AGENT LOAD] No agent config yet, querying for default agent")
+    #     default_agent_result = await client.schema('public').table('agents').select('*').eq('user_id', user_id).eq('is_default', True).execute()
+    #     logger.info(f"[AGENT LOAD] Default agent query result: found {len(default_agent_result.data) if default_agent_result.data else 0} default agents")
         
-        if default_agent_result.data:
-            agent_data = default_agent_result.data[0]
+    #     if default_agent_result.data:
+    #         agent_data = default_agent_result.data[0]
             
-            # Use versioning system to get current version
-            version_data = None
-            if agent_data.get('current_version_id'):
-                try:
-                    version_service = await _get_version_service()
-                    version_obj = await version_service.get_version(
-                        agent_id=agent_data['agent_id'],
-                        version_id=agent_data['current_version_id'],
-                        user_id=user_id
-                    )
-                    version_data = version_obj.to_dict()
-                    logger.info(f"[AGENT LOAD] Got default agent version from version manager: {version_data.get('version_name')}")
-                except Exception as e:
-                    logger.warning(f"[AGENT LOAD] Failed to get default agent version data: {e}")
+    #         # # Use versioning system to get current version
+    #         # version_data = None
+    #         # if agent_data.get('current_version_id'):
+    #         #     try:
+    #         #         version_service = await _get_version_service()
+    #         #         version_obj = await version_service.get_version(
+    #         #             agent_id=agent_data['agent_id'],
+    #         #             version_id=agent_data['current_version_id'],
+    #         #             user_id=user_id
+    #         #         )
+    #         #         version_data = version_obj.to_dict()
+    #         #         logger.info(f"[AGENT LOAD] Got default agent version from version manager: {version_data.get('version_name')}")
+    #         #     except Exception as e:
+    #         #         logger.warning(f"[AGENT LOAD] Failed to get default agent version data: {e}")
             
-            logger.info(f"[AGENT LOAD] About to call extract_agent_config for DEFAULT agent with version data: {version_data is not None}")
+    #         # logger.info(f"[AGENT LOAD] About to call extract_agent_config for DEFAULT agent with version data: {version_data is not None}")
             
-            agent_config = extract_agent_config(agent_data, version_data)
+    #         agent_config = extract_agent_config(agent_data, version_data)
             
-            if version_data:
-                logger.info(f"Using default agent: {agent_config['name']} ({agent_config['agent_id']}) version {agent_config.get('version_name', 'v1')}")
-            else:
-                logger.info(f"Using default agent: {agent_config['name']} ({agent_config['agent_id']}) - no version data")
-        else:
-            logger.warning(f"[AGENT LOAD] No default agent found for user {user_id}")
+    #         if version_data:
+    #             logger.info(f"Using default agent: {agent_config['name']} ({agent_config['agent_id']}) version {agent_config.get('version_name', 'v1')}")
+    #         else:
+    #             logger.info(f"Using default agent: {agent_config['name']} ({agent_config['agent_id']}) - no version data")
+    #     else:
+    #         logger.warning(f"[AGENT LOAD] No default agent found for user {user_id}")
             
-            # 🆕 自动创建默认Agent（兜底机制）
-            logger.info(f"  🔧 为用户 {user_id} 自动创建默认Agent")
-            agent_id = await _create_default_agent_for_user(client, user_id)
+    #         # 🆕 自动创建默认Agent（兜底机制）
+    #         logger.info(f"  🔧 为用户 {user_id} 自动创建默认Agent")
+    #         agent_id = await _create_default_agent_for_user(client, user_id)
             
-            if agent_id:
-                # 重新查询刚创建的默认Agent
-                default_agent_result = await client.schema('public').table('agents').select('*').eq('user_id', user_id).eq('is_default', True).execute()
-                if default_agent_result.data:
-                    agent_data = default_agent_result.data[0]
-                    logger.info(f"  ✅ 自动创建的默认Agent: {agent_data.get('name', 'Unknown')} (ID: {agent_data.get('agent_id')})")
+    #         if agent_id:
+    #             # 重新查询刚创建的默认Agent
+    #             default_agent_result = await client.schema('public').table('agents').select('*').eq('user_id', user_id).eq('is_default', True).execute()
+    #             if default_agent_result.data:
+    #                 agent_data = default_agent_result.data[0]
+    #                 logger.info(f"  ✅ 自动创建的默认Agent: {agent_data.get('name', 'Unknown')} (ID: {agent_data.get('agent_id')})")
                     
-                    # 使用版本系统获取当前版本（暂时跳过）
-                    version_data = None
-                    agent_config = extract_agent_config(agent_data, version_data)
+    #                 # 使用版本系统获取当前版本（暂时跳过）
+    #                 version_data = None
+    #                 agent_config = extract_agent_config(agent_data, version_data)
                     
-                    logger.info(f"  🎯 使用自动创建的默认Agent: {agent_config['name']} ({agent_config['agent_id']})")
-                else:
-                    logger.error(f"  ❌ 自动创建默认Agent后仍然无法查询到")
-            else:
-                logger.error(f"  ❌ 自动创建默认Agent失败")
+    #                 logger.info(f"  🎯 使用自动创建的默认Agent: {agent_config['name']} ({agent_config['agent_id']})")
+    #             else:
+    #                 logger.error(f"  ❌ 自动创建默认Agent后仍然无法查询到")
+    #         else:
+    #             logger.error(f"  ❌ 自动创建默认Agent失败")
 
-    logger.info(f"[AGENT LOAD] Final agent_config: {agent_config is not None}")
-    if agent_config:
-        logger.info(f"[AGENT LOAD] Agent config keys: {list(agent_config.keys())}")
-        logger.info(f"Using agent {agent_config['agent_id']} for this agent run (thread remains agent-agnostic)")
+    # logger.info(f"[AGENT LOAD] Final agent_config: {agent_config is not None}")
+    # if agent_config:
+    #     logger.info(f"[AGENT LOAD] Agent config keys: {list(agent_config.keys())}")
+    #     logger.info(f"Using agent {agent_config['agent_id']} for this agent run (thread remains agent-agnostic)")
 
-    # Run all checks concurrently
-    model_check_task = asyncio.create_task(can_use_model(client, account_id, model_name))
-    billing_check_task = asyncio.create_task(check_billing_status(client, account_id))
-    limit_check_task = asyncio.create_task(check_agent_run_limit(client, account_id))
+    # # Run all checks concurrently
+    # model_check_task = asyncio.create_task(can_use_model(client, account_id, model_name))
+    # billing_check_task = asyncio.create_task(check_billing_status(client, account_id))
+    # limit_check_task = asyncio.create_task(check_agent_run_limit(client, account_id))
 
     # Wait for all checks to complete
-    (can_use, model_message, allowed_models), (can_run, message, subscription), limit_check = await asyncio.gather(
-        model_check_task, billing_check_task, limit_check_task
-    )
+    # (can_use, model_message, allowed_models), (can_run, message, subscription), limit_check = await asyncio.gather(
+    #     model_check_task, billing_check_task, limit_check_task
+    # )
 
-    # Check results and raise appropriate errors
-    if not can_use:
-        raise HTTPException(status_code=403, detail={"message": model_message, "allowed_models": allowed_models})
+    # # Check results and raise appropriate errors
+    # if not can_use:
+    #     raise HTTPException(status_code=403, detail={"message": model_message, "allowed_models": allowed_models})
 
-    if not can_run:
-        raise HTTPException(status_code=402, detail={"message": message, "subscription": subscription})
+    # if not can_run:
+    #     raise HTTPException(status_code=402, detail={"message": message, "subscription": subscription})
 
-    if not limit_check['can_start']:
-        error_detail = {
-            "message": f"Maximum of {config.MAX_PARALLEL_AGENT_RUNS} parallel agent runs allowed within 24 hours. You currently have {limit_check['running_count']} running.",
-            "running_thread_ids": limit_check['running_thread_ids'],
-            "running_count": limit_check['running_count'],
-            "limit": config.MAX_PARALLEL_AGENT_RUNS
-        }
-        logger.warning(f"Agent run limit exceeded for account {account_id}: {limit_check['running_count']} running agents")
-        raise HTTPException(status_code=429, detail=error_detail)
+    # if not limit_check['can_start']:
+    #     error_detail = {
+    #         "message": f"Maximum of {config.MAX_PARALLEL_AGENT_RUNS} parallel agent runs allowed within 24 hours. You currently have {limit_check['running_count']} running.",
+    #         "running_thread_ids": limit_check['running_thread_ids'],
+    #         "running_count": limit_check['running_count'],
+    #         "limit": config.MAX_PARALLEL_AGENT_RUNS
+    #     }
+    #     logger.warning(f"Agent run limit exceeded for account {account_id}: {limit_check['running_count']} running agents")
+    #     raise HTTPException(status_code=429, detail=error_detail)
 
     effective_model = model_name
     if not model_name and agent_config and agent_config.get('model'):
@@ -561,12 +572,9 @@ async def start_agent(
         enable_thinking=body.enable_thinking, reasoning_effort=body.reasoning_effort,
         stream=body.stream, enable_context_manager=body.enable_context_manager,
         agent_config=agent_config,  # Pass agent configuration
-        is_agent_builder=is_agent_builder,
-        target_agent_id=target_agent_id,
+        # is_agent_builder=is_agent_builder,
+        # target_agent_id=target_agent_id,
         request_id=request_id,
-        # ADK相关参数
-        user_id=user_id,
-        user_message=body.prompt,  # 使用用户输入的prompt作为user_message
     )
 
     return {"agent_run_id": agent_run_id, "status": "running"}
@@ -1152,9 +1160,9 @@ async def initiate_agent_with_files(
     logger.info(f"Starting new agent session with prompt: {prompt}")
     logger.info(f"Starting new agent session with model name: {model_name}")
 
-    # # 打印文件详细信息
-    # for i, file in enumerate(files):
-    #     print(f"  - 文件{i+1}: {file.filename} (大小: {file.size if hasattr(file, 'size') else '未知'} bytes, 类型: {file.content_type})")
+    # 打印文件详细信息
+    for i, file in enumerate(files):
+        logger.info(f"Upload Files {i+1}: {file.filename} (size: {file.size if hasattr(file, 'size') else 'unknown'} bytes, type: {file.content_type})")
     
     global instance_id
     logger.info(f"Current instance_id: {instance_id}")
@@ -1183,49 +1191,13 @@ async def initiate_agent_with_files(
     # 4: 加载Agent配置（支持版本管理）
     agent_config = None
     logger.info(f"Requested agent_id: {agent_id}")
+
     if agent_id:
-        # TODO 等待实现
+        # TODO ：自主创建 Agent 及配置管理（可以通过 agent_id 来加载默认的配置）
         pass
-        # print(f"  🎯 查询指定的Agent: {agent_id}")
-        # # 获取指定的Agent
-        # agent_result = await client.table('agents').select('*').eq('agent_id', agent_id).eq('account_id', user_id).execute()
-        # print(f"  📊 查询结果: 找到 {len(agent_result.data) if agent_result.data else 0} 个Agent")
-        
-        # if not agent_result.data:
-        #     print(f"  ❌ 未找到Agent或访问被拒绝: {agent_id}")
-        #     raise HTTPException(status_code=404, detail="Agent not found or access denied")
-        
-        # agent_data = agent_result.data[0]
-        # print(f"  ✅ 找到Agent: {agent_data.get('name', 'Unknown')} (ID: {agent_id})")
-        
-        # # 使用版本系统获取当前版本
-        # version_data = None
-        # if agent_data.get('current_version_id'):
-        #     try:
-        #         print(f"  🔄 获取版本数据: {agent_data['current_version_id']}")
-        #         version_service = await _get_version_service()
-        #         version_obj = await version_service.get_version(
-        #             agent_id=agent_id,
-        #             version_id=agent_data['current_version_id'],
-        #             user_id=user_id
-        #         )
-        #         version_data = version_obj.to_dict()
-        #         print(f"  ✅ 从版本管理器获取版本数据: {version_data.get('version_name')}")
-        #         print(f"  📋 版本数据详情: {version_data}")
-        #     except Exception as e:
-        #         print(f"  ⚠️ 获取版本数据失败: {e}")
-        
-        # print(f"  🔧 准备调用extract_agent_config，是否有版本数据: {version_data is not None}")
-        
-        # agent_config = extract_agent_config(agent_data, version_data)
-        
-        # if version_data:
-        #     logger.info(f"  🎯 使用自定义Agent: {agent_config['name']} ({agent_id}) 版本 {agent_config.get('version_name', 'v1')}")
-        # else:
-        #     logger.info(f"  🎯 使用自定义Agent: {agent_config['name']} ({agent_id}) - 无版本数据")
     else:
         logger.info(f"No agent_id provided, querying default agent")
-        # 从数据库中获取当前用户的默认Agent
+        # 从数据库中获取当前用户的默认Agent（系统自动创建统一的）
         default_agent_result = await client.schema('public').table('agents').select('*').eq('user_id', user_id).eq('is_default', True).execute()
         logger.info(f"Default agent query result: found {len(default_agent_result.data) if default_agent_result.data else 0} default agents")
         
@@ -1233,11 +1205,11 @@ async def initiate_agent_with_files(
             agent_data = default_agent_result.data[0]
             logger.info(f"Found default agent: {agent_data.get('name', 'Unknown')} (ID: {agent_data.get('agent_id')})")
             
-            # 使用版本系统获取当前版本
+            # TODO：使用版本系统获取当前版本（可以做版本控制）
             version_data = None
             # if agent_data.get('current_version_id'):
             #     try:
-            #         logger.info(f"  🔄 获取默认Agent版本数据: {agent_data['current_version_id']}")
+            #         logger.info(f"Get default agent version data: {agent_data['current_version_id']}")
             #         version_service = await _get_version_service()
             #         version_obj = await version_service.get_version(
             #             agent_id=agent_data['agent_id'],
@@ -1245,11 +1217,11 @@ async def initiate_agent_with_files(
             #             user_id=user_id
             #         )
             #         version_data = version_obj.to_dict()
-            #         logger.info(f"  ✅ 从版本管理器获取默认Agent版本: {version_data.get('version_name')}")
+            #         logger.info(f"Get default agent version data: {version_data.get('version_name')}")
             #     except Exception as e:
-            #         logger.warning(f"  ⚠️ 获取默认Agent版本数据失败: {e}")
+            #         logger.warning(f"Get default agent version data failed: {e}")
             
-            # logger.info(f"  🔧 准备为默认Agent调用extract_agent_config，是否有版本数据: {version_data is not None}")
+            # logger.info(f"Prepare to call extract_agent_config for default agent, whether there is version data: {version_data is not None}")
             
             agent_config = extract_agent_config(agent_data, version_data)
             
@@ -1772,7 +1744,7 @@ async def get_agents(
                         # Mark these as default agents available to this user
                         for agent in default_agents:
                             agent['is_default'] = True
-                            agent['account_id'] = user_id  # Make them available to this user
+                            agent['user_id'] = user_id  # Make them available to this user
                         all_agents.extend(default_agents)
         
         # Convert agents to expected format and add required fields
@@ -1784,7 +1756,7 @@ async def get_agents(
             # Ensure required fields exist
             agent_record = {
                 'agent_id': agent.get('agent_id', f"agent_{i}"),
-                'account_id': agent.get('account_id', user_id),
+                'account_id': agent.get('user_id', user_id),
                 'name': agent.get('name', f'Agent {i+1}'),
                 'description': agent.get('description', ''),
                 'system_prompt': agent.get('system_prompt', ''),
@@ -1840,7 +1812,7 @@ async def get_agents(
                     'is_active': True,
                     'created_at': agent.get('created_at'),
                     'updated_at': agent.get('updated_at'),
-                    'created_by': agent.get('account_id'),
+                    'created_by': agent.get('user_id'),
                 }
                 agent_version_map[agent_id] = version_dict
         
@@ -1961,7 +1933,7 @@ async def get_agents(
             # Use agent data directly (no need for extract_agent_config)
             agent_list.append(AgentResponse(
                 agent_id=agent['agent_id'],
-                account_id=agent['account_id'],
+                account_id=agent['user_id'],
                 name=agent['name'],
                 description=agent.get('description'),
                 system_prompt=agent.get('system_prompt', ''),
@@ -1974,12 +1946,12 @@ async def get_agents(
                 avatar=agent.get('avatar'),
                 avatar_color=agent.get('avatar_color'),
                 profile_image_url=agent.get('profile_image_url'),
-                created_at=agent['created_at'],
-                updated_at=agent['updated_at'],
+                created_at=agent['created_at'].isoformat() if agent['created_at'] else None,
+                updated_at=agent['updated_at'].isoformat() if agent.get('updated_at') else None,
                 current_version_id=agent.get('current_version_id'),
                 version_count=agent.get('version_count', 1),
                 current_version=current_version,
-                metadata=agent.get('metadata')
+                metadata=json.loads(agent.get('metadata', '{}')) if isinstance(agent.get('metadata'), str) else agent.get('metadata', {})
             ))
         
         total_pages = (total_count + limit - 1) // limit
@@ -2013,12 +1985,12 @@ async def get_agent(agent_id: str, user_id: str = Depends(get_current_user_id_fr
     
     try:
         # Get agent
-        agent = await client.table('agents').select('*').eq("agent_id", agent_id).execute()
+        agent_result = await client.table('agents').select('*').eq("agent_id", agent_id).execute()
         
-        if not agent.data:
+        if not agent_result.data:
             raise HTTPException(status_code=404, detail="Agent not found")
         
-        agent_data = agent.data[0]
+        agent_data = agent_result.data[0]
         
         # Check ownership - only owner can access non-public agents
         if agent_data['account_id'] != user_id and not agent_data.get('is_public', False):
@@ -2163,7 +2135,7 @@ async def export_agent(agent_id: str, user_id: str = Depends(get_current_user_id
         export_metadata = {}
         if agent.get('metadata'):
             export_metadata = {k: v for k, v in agent['metadata'].items() 
-                             if k not in ['is_suna_default', 'centrally_managed', 'installation_date', 'last_central_update']}
+                             if k not in ['is_fufanmanus_default', 'centrally_managed', 'installation_date', 'last_central_update']}
         
         export_data = {
             "tools": sanitized_config['tools'],
@@ -2316,6 +2288,8 @@ async def create_agent(
             status_code=403, 
             detail="Custom agents currently disabled. This feature is not available at the moment."
         )
+    
+    # 连接数据库
     client = await db.client
     
     from .utils import check_agent_count_limit
@@ -2333,41 +2307,53 @@ async def create_agent(
         raise HTTPException(status_code=402, detail=error_detail)
     
     try:
+        # 创建或更新Agent时，如果 is_default=True,将该用户的所有其他Agent的 is_default 设为 False. 确保只有一个Agent是默认的
         if agent_data.is_default:
-            await client.table('agents').update({"is_default": False}).eq("account_id", user_id).eq("is_default", True).execute()
+            await client.table('agents').update({"is_default": False}).eq("user_id", user_id).eq("is_default", True)
+   
+        # 获取默认的系统提示词和工具
+        from agent.config_helper import get_default_system_prompt_for_fufanmanus_agent
+        default_system_prompt = get_default_system_prompt_for_fufanmanus_agent()
+        
+        # 获取默认工具配置
+        from agent.fufanmanus.config import FufanmanusConfig
+        default_tools = FufanmanusConfig.DEFAULT_TOOLS
         
         insert_data = {
-            "account_id": user_id,
+            "agent_id": str(uuid.uuid4()),
+            "user_id": user_id,  
             "name": agent_data.name,
-            "description": agent_data.description,
-            # Deprecated fields still populated if sent by older clients
+            "description": agent_data.description or "",
+            "system_prompt": agent_data.system_prompt or default_system_prompt,
+            "model": agent_data.model or "gpt-4o",
+            "configured_mcps": json.dumps(agent_data.configured_mcps or []),
+            "custom_mcps": json.dumps(agent_data.custom_mcps or []),
+            "agentpress_tools": json.dumps(agent_data.agentpress_tools or default_tools),
             "avatar": agent_data.avatar,
             "avatar_color": agent_data.avatar_color,
-            # New profile image url field
             "profile_image_url": agent_data.profile_image_url,
             "is_default": agent_data.is_default or False,
             "version_count": 1
         }
-        
-        new_agent = await client.table('agents').insert(insert_data).execute()
-        
+
+        new_agent = await client.table('agents').insert(insert_data)
+
         if not new_agent.data:
             raise HTTPException(status_code=500, detail="Failed to create agent")
         
         agent = new_agent.data[0]
-        
+
         try:
             version_service = await _get_version_service()
-            from agent.config_helper import get_default_system_prompt_for_suna_agent
-            system_prompt = get_default_system_prompt_for_suna_agent()
-            
+
             version = await version_service.create_version(
                 agent_id=agent['agent_id'],
                 user_id=user_id,
-                system_prompt=system_prompt,
+                system_prompt=agent_data.system_prompt or default_system_prompt,
+                model=agent_data.model or "gpt-4o",
                 configured_mcps=agent_data.configured_mcps or [],
                 custom_mcps=agent_data.custom_mcps or [],
-                agentpress_tools=agent_data.agentpress_tools or {},
+                agentpress_tools=agent_data.agentpress_tools or default_tools,
                 version_name="v1",
                 change_description="Initial version"
             )
@@ -2396,12 +2382,13 @@ async def create_agent(
             raise HTTPException(status_code=500, detail="Failed to create initial version")
         
         from utils.cache import Cache
+        # 清除用户当前Agent数量限制缓存，因为创建了新的Agent，数量发生变化，下次查询时会重新计算
         await Cache.invalidate(f"agent_count_limit:{user_id}")
         
         logger.info(f"Created agent {agent['agent_id']} with v1 for user: {user_id}")
         return AgentResponse(
             agent_id=agent['agent_id'],
-            account_id=agent['account_id'],
+            account_id=agent['user_id'],
             name=agent['name'],
             description=agent.get('description'),
             system_prompt=version.system_prompt,
@@ -2415,14 +2402,13 @@ async def create_agent(
             avatar=agent.get('avatar'),
             avatar_color=agent.get('avatar_color'),
             profile_image_url=agent.get('profile_image_url'),
-            created_at=agent['created_at'],
-            updated_at=agent.get('updated_at', agent['created_at']),
+            created_at=agent['created_at'].isoformat() if agent['created_at'] else None,
+            updated_at=agent.get('updated_at').isoformat() if agent.get('updated_at') else agent['created_at'].isoformat(),
             current_version_id=agent.get('current_version_id'),
             version_count=agent.get('version_count', 1),
             current_version=current_version,
-            metadata=agent.get('metadata')
+            metadata=json.loads(agent.get('metadata', '{}')) if isinstance(agent.get('metadata'), str) else agent.get('metadata', {})
         )
-        
     except HTTPException:
         raise
     except Exception as e:
@@ -2474,55 +2460,55 @@ async def update_agent(
         existing_data = existing_agent.data
 
         agent_metadata = existing_data.get('metadata', {})
-        is_suna_agent = agent_metadata.get('is_suna_default', False)
+        is_fufanmanus_agent = agent_metadata.get('is_fufanmanus_default', False)
         restrictions = agent_metadata.get('restrictions', {})
         
-        if is_suna_agent:
-            logger.warning(f"Update attempt on Suna default agent {agent_id} by user {user_id}")
+        if is_fufanmanus_agent:
+            logger.warning(f"Update attempt on FuFanManus default agent {agent_id} by user {user_id}")
             
             if (agent_data.name is not None and 
                 agent_data.name != existing_data.get('name') and 
                 restrictions.get('name_editable') == False):
-                logger.error(f"User {user_id} attempted to modify restricted name of Suna agent {agent_id}")
+                logger.error(f"User {user_id} attempted to modify restricted name of FuFanManus agent {agent_id}")
                 raise HTTPException(
                     status_code=403, 
-                    detail="Suna's name cannot be modified. This restriction is managed centrally."
+                    detail="FuFanManus's name cannot be modified. This restriction is managed centrally."
                 )
             
             if (agent_data.description is not None and
                 agent_data.description != existing_data.get('description') and 
                 restrictions.get('description_editable') == False):
-                logger.error(f"User {user_id} attempted to modify restricted description of Suna agent {agent_id}")
+                logger.error(f"User {user_id} attempted to modify restricted description of FuFanManus agent {agent_id}")
                 raise HTTPException(
                     status_code=403, 
-                    detail="Suna's description cannot be modified."
+                    detail="FuFanManus's description cannot be modified."
                 )
             
             if (agent_data.system_prompt is not None and 
                 restrictions.get('system_prompt_editable') == False):
-                logger.error(f"User {user_id} attempted to modify restricted system prompt of Suna agent {agent_id}")
+                logger.error(f"User {user_id} attempted to modify restricted system prompt of FuFanManus agent {agent_id}")
                 raise HTTPException(
                     status_code=403, 
-                    detail="Suna's system prompt cannot be modified. This is managed centrally to ensure optimal performance."
+                    detail="FuFanManus's system prompt cannot be modified. This is managed centrally to ensure optimal performance."
                 )
             
             if (agent_data.agentpress_tools is not None and 
                 restrictions.get('tools_editable') == False):
-                logger.error(f"User {user_id} attempted to modify restricted tools of Suna agent {agent_id}")
+                logger.error(f"User {user_id} attempted to modify restricted tools of FuFanManus agent {agent_id}")
                 raise HTTPException(
                     status_code=403, 
-                    detail="Suna's default tools cannot be modified. These tools are optimized for Suna's capabilities."
+                    detail="FuFanManus's default tools cannot be modified. These tools are optimized for FuFanManus's capabilities."
                 )
             
             if ((agent_data.configured_mcps is not None or agent_data.custom_mcps is not None) and 
                 restrictions.get('mcps_editable') == False):
-                logger.error(f"User {user_id} attempted to modify restricted MCPs of Suna agent {agent_id}")
+                logger.error(f"User {user_id} attempted to modify restricted MCPs of FuFanManus agent {agent_id}")
                 raise HTTPException(
                     status_code=403, 
-                    detail="Suna's integrations cannot be modified."
+                    detail="FuFanManus's integrations cannot be modified."
                 )
             
-            logger.info(f"Suna agent update validation passed for agent {agent_id} by user {user_id}")
+            logger.info(f"FuFanManus agent update validation passed for agent {agent_id} by user {user_id}")
 
         current_version_data = None
         if existing_data.get('current_version_id'):
@@ -2638,7 +2624,7 @@ async def update_agent(
         if agent_data.is_default is not None:
             update_data["is_default"] = agent_data.is_default
             if agent_data.is_default:
-                await client.table('agents').update({"is_default": False}).eq("account_id", user_id).eq("is_default", True).neq("agent_id", agent_id).execute()
+                await client.table('agents').update({"is_default": False}).eq("user_id", user_id).eq("is_default", True).neq("agent_id", agent_id).execute()
         if agent_data.avatar is not None:
             update_data["avatar"] = agent_data.avatar
         if agent_data.avatar_color is not None:
@@ -2761,7 +2747,7 @@ async def update_agent(
         
         return AgentResponse(
             agent_id=agent['agent_id'],
-            account_id=agent['account_id'],
+            account_id=agent['user_id'],
             name=agent['name'],
             description=agent.get('description'),
             system_prompt=system_prompt,
@@ -2774,12 +2760,12 @@ async def update_agent(
             avatar=agent_config.get('avatar'),
             avatar_color=agent_config.get('avatar_color'),
             profile_image_url=agent_config.get('profile_image_url'),
-            created_at=agent['created_at'],
-            updated_at=agent.get('updated_at', agent['created_at']),
+            created_at=agent['created_at'].isoformat() if agent['created_at'] else None,
+            updated_at=agent.get('updated_at').isoformat() if agent.get('updated_at') else agent['created_at'].isoformat(),
             current_version_id=agent.get('current_version_id'),
             version_count=agent.get('version_count', 1),
             current_version=current_version,
-            metadata=agent.get('metadata')
+            metadata=json.loads(agent.get('metadata', '{}')) if isinstance(agent.get('metadata'), str) else agent.get('metadata', {})
         )
         
     except HTTPException:
@@ -2804,14 +2790,14 @@ async def delete_agent(agent_id: str, user_id: str = Depends(get_current_user_id
             raise HTTPException(status_code=404, detail="Agent not found")
         
         agent = agent_result.data[0]
-        if agent['account_id'] != user_id:
+        if agent['user_id'] != user_id:
             raise HTTPException(status_code=403, detail="Access denied")
         
         if agent['is_default']:
             raise HTTPException(status_code=400, detail="Cannot delete default agent")
         
-        if agent.get('metadata', {}).get('is_suna_default', False):
-            raise HTTPException(status_code=400, detail="Cannot delete Suna default agent")
+        if agent.get('metadata', {}).get('is_fufanmanus_default', False):
+            raise HTTPException(status_code=400, detail="Cannot delete FuFanManus default agent")
         
         delete_result = await client.table('agents').delete().eq('agent_id', agent_id).execute()
         
@@ -2849,7 +2835,7 @@ async def get_agent_builder_chat_history(
     client = await db.client
     
     try:
-        agent_result = await client.table('agents').select('*').eq('agent_id', agent_id).eq('account_id', user_id).execute()
+        agent_result = await client.table('agents').select('*').eq('agent_id', agent_id).eq('user_id', user_id).execute()
         if not agent_result.data:
             raise HTTPException(status_code=404, detail="Agent not found or access denied")
         
@@ -2858,6 +2844,15 @@ async def get_agent_builder_chat_history(
         agent_builder_threads = []
         for thread in threads_result.data:
             metadata = thread.get('metadata', {})
+            # 如果metadata是字符串，解析为字典
+            if isinstance(metadata, str):
+                try:
+                    metadata = json.loads(metadata)
+                except (json.JSONDecodeError, TypeError):
+                    metadata = {}
+            elif not isinstance(metadata, dict):
+                metadata = {}
+            
             if (metadata.get('is_agent_builder') and 
                 metadata.get('target_agent_id') == agent_id):
                 agent_builder_threads.append({
@@ -3308,7 +3303,7 @@ async def get_agent_tools(
     if not agent_result.data:
         raise HTTPException(status_code=404, detail="Agent not found")
     agent = agent_result.data[0]
-    if agent['account_id'] != user_id and not agent.get('is_public', False):
+    if agent['user_id'] != user_id and not agent.get('is_public', False):
         raise HTTPException(status_code=403, detail="Access denied")
 
 

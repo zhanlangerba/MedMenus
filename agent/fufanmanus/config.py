@@ -2,9 +2,9 @@ import datetime
 from typing import Dict, Any, List
 from agent.prompt import SYSTEM_PROMPT
 
-class SunaConfig:
-    NAME = "Suna"
-    DESCRIPTION = "Suna is your AI assistant with access to various tools and integrations to help you with tasks across domains."
+class FufanmanusConfig:
+    NAME = "FuFanManus"
+    DESCRIPTION = "FuFanManus is your AI assistant with access to various tools and integrations to help you with tasks across domains."
     AVATAR = "🌞"
     AVATAR_COLOR = "#F59E0B"
     DEFAULT_MODEL = "anthropic/claude-sonnet-4-20250514"
@@ -66,19 +66,19 @@ class SunaConfig:
 
 
 def add_tool(tool_name: str, description: str, enabled: bool = True):
-    SunaConfig.DEFAULT_TOOLS[tool_name] = {
+    FufanmanusConfig.DEFAULT_TOOLS[tool_name] = {
         "enabled": enabled,
         "description": description
     }
 
 def remove_tool(tool_name: str):
-    if tool_name in SunaConfig.DEFAULT_TOOLS:
-        del SunaConfig.DEFAULT_TOOLS[tool_name]
+    if tool_name in FufanmanusConfig.DEFAULT_TOOLS:
+        del FufanmanusConfig.DEFAULT_TOOLS[tool_name]
 
 def enable_tool(tool_name: str):
-    if tool_name in SunaConfig.DEFAULT_TOOLS:
-        SunaConfig.DEFAULT_TOOLS[tool_name]["enabled"] = True
+    if tool_name in FufanmanusConfig.DEFAULT_TOOLS:
+        FufanmanusConfig.DEFAULT_TOOLS[tool_name]["enabled"] = True
 
 def disable_tool(tool_name: str):  
-    if tool_name in SunaConfig.DEFAULT_TOOLS:
-        SunaConfig.DEFAULT_TOOLS[tool_name]["enabled"] = False 
+    if tool_name in FufanmanusConfig.DEFAULT_TOOLS:
+        FufanmanusConfig.DEFAULT_TOOLS[tool_name]["enabled"] = False 

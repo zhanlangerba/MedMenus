@@ -166,7 +166,11 @@ api_router.include_router(auth_router)
 api_router.include_router(feature_flags_api.router)
 
 # Include all API routers without individual prefixes
-api_router.include_router(agent_api.router)  
+api_router.include_router(agent_api.router)
+
+# Include agent versioning router
+from agent.versioning.api import router as versioning_router
+api_router.include_router(versioning_router)  
 # api_router.include_router(sandbox_api.router)
 # api_router.include_router(billing_api.router)
 

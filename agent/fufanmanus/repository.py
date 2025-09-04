@@ -1,7 +1,7 @@
 from typing import List, Dict, Any, Optional, Tuple
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from services.supabase import DBConnection
+from services.postgresql import DBConnection
 from utils.logger import logger
 
 
@@ -175,19 +175,19 @@ class SunaAgentRepository:
         account_id: str,
     ) -> str:
         try:
-            from agent.suna.config import SunaConfig
+            from agent.fufanmanus.config import FufanmanusConfig
             
             client = await self.db.client
             
             agent_data = {
                 "account_id": account_id,
-                "name": SunaConfig.NAME,
-                "description": SunaConfig.DESCRIPTION,
+                "name": FufanmanusConfig.NAME,
+                "description": FufanmanusConfig.DESCRIPTION,
                 "is_default": True,
-                "avatar": SunaConfig.AVATAR,
-                "avatar_color": SunaConfig.AVATAR_COLOR,
+                "avatar": FufanmanusConfig.AVATAR,
+                "avatar_color": FufanmanusConfig.AVATAR_COLOR,
                 "metadata": {
-                    "is_suna_default": True,
+                    "is_fufanmanus_default": True,
                     "centrally_managed": True,
                     "installation_date": datetime.now(timezone.utc).isoformat()
                 },
@@ -203,10 +203,10 @@ class SunaAgentRepository:
                     agent_id=agent_id,
                     account_id=account_id,
                     system_prompt="[MANAGED]",
-                    model=SunaConfig.DEFAULT_MODEL,
-                    configured_mcps=SunaConfig.DEFAULT_MCPS,
-                    custom_mcps=SunaConfig.DEFAULT_CUSTOM_MCPS,
-                    agentpress_tools=SunaConfig.DEFAULT_TOOLS
+                                model=FufanmanusConfig.DEFAULT_MODEL,
+            configured_mcps=FufanmanusConfig.DEFAULT_MCPS,
+            custom_mcps=FufanmanusConfig.DEFAULT_CUSTOM_MCPS,
+            agentpress_tools=FufanmanusConfig.DEFAULT_TOOLS
                 )
                 return agent_id
             
@@ -299,13 +299,13 @@ class SunaAgentRepository:
         """
         try:
             from agent.versioning.version_service import get_version_service
-            from agent.suna.config import SunaConfig
+            from agent.fufanmanus.config import FufanmanusConfig
             
-            # Build configuration exclusively from SunaConfig and provided unified_config
-            system_prompt = SunaConfig.get_system_prompt()
-            model = SunaConfig.DEFAULT_MODEL
-            configured_mcps = SunaConfig.DEFAULT_MCPS
-            custom_mcps = SunaConfig.DEFAULT_CUSTOM_MCPS
+            # Build configuration exclusively from FufanmanusConfig and provided unified_config
+            system_prompt = FufanmanusConfig.get_system_prompt()
+            model = FufanmanusConfig.DEFAULT_MODEL
+            configured_mcps = FufanmanusConfig.DEFAULT_MCPS
+            custom_mcps = FufanmanusConfig.DEFAULT_CUSTOM_MCPS
             agentpress_tools = unified_config.get('tools', {}).get('agentpress', {})
             
             # Create the version record using the version service

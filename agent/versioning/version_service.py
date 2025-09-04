@@ -5,7 +5,7 @@ from typing import Dict, List, Any, Optional
 from uuid import uuid4, UUID
 from enum import Enum
 
-from services.supabase import DBConnection
+from services.postgresql import DBConnection
 from utils.logger import logger
 
 
@@ -80,15 +80,27 @@ class VersionService:
     async def _get_client(self):
         return await self.db.client
     
+    def _parse_datetime(self, dt_value) -> datetime:
+        """Parse datetime from database, handling both string and datetime objects"""
+        if isinstance(dt_value, datetime):
+            return dt_value
+        elif isinstance(dt_value, str):
+            # Handle ISO format strings with Z timezone
+            if dt_value.endswith('Z'):
+                dt_value = dt_value.replace('Z', '+00:00')
+            return datetime.fromisoformat(dt_value)
+        else:
+            raise ValueError(f"Unexpected datetime type: {type(dt_value)}")
+    
     async def _verify_agent_access(self, agent_id: str, user_id: str) -> tuple[bool, bool]:
         if user_id == "system":
             return True, True
             
         client = await self._get_client()
         
-        owner_result = await client.table('agents').select('account_id').eq(
+        owner_result = await client.table('agents').select('user_id').eq(
             'agent_id', agent_id
-        ).eq('account_id', user_id).execute()
+        ).eq('user_id', user_id).execute()
         
         is_owner = bool(owner_result.data)
         
@@ -131,15 +143,14 @@ class VersionService:
             'version_count': version_count
         }
         
-        result = await client.table('agents').update(data).eq(
-            'agent_id', agent_id
-        ).execute()
+        result = await client.table('agents').eq('agent_id', agent_id).update(data)
         
         if not result.data:
             raise Exception("Failed to update agent current version")
     
     def _version_from_db_row(self, row: Dict[str, Any]) -> AgentVersion:
-        config = row.get('config', {})
+        config_raw = row.get('config', '{}')
+        config = json.loads(config_raw) if isinstance(config_raw, str) else config_raw
         tools = config.get('tools', {})
         
         return AgentVersion(
@@ -153,8 +164,8 @@ class VersionService:
             custom_mcps=tools.get('custom_mcp', []),
             agentpress_tools=tools.get('agentpress', {}),
             is_active=row.get('is_active', False),
-            created_at=datetime.fromisoformat(row['created_at'].replace('Z', '+00:00')),
-            updated_at=datetime.fromisoformat(row['updated_at'].replace('Z', '+00:00')),
+            created_at=self._parse_datetime(row['created_at']),
+            updated_at=self._parse_datetime(row['updated_at']),
             created_by=row['created_by'],
             change_description=row.get('change_description'),
             previous_version_id=row.get('previous_version_id')
@@ -203,19 +214,20 @@ class VersionService:
     ) -> AgentVersion:
         
         logger.info(f"Creating version for agent {agent_id}")
-        client = await self.db.client
+        client = await self._get_client()
         
         is_owner, _ = await self._verify_agent_access(agent_id, user_id)
         if not is_owner:
             raise UnauthorizedError("Unauthorized to create version for this agent")
         
-        current_result = await client.table('agents').select('current_version_id, version_count').eq('agent_id', agent_id).single().execute()
+        current_result = await client.table('agents').select('current_version_id, version_count').eq('agent_id', agent_id).limit(1).execute()
         
         if not current_result.data:
             raise Exception("Agent not found")
         
-        previous_version_id = current_result.data.get('current_version_id')
-        version_number = (current_result.data.get('version_count') or 0) + 1
+        previous_version_id = current_result.data[0].get('current_version_id')
+        # 使用统一的版本号生成逻辑，从agent_versions表中查询实际的最大版本号
+        version_number = await self._get_next_version_number(agent_id)
         
         if not version_name:
             version_name = f"v{version_number}"
@@ -249,12 +261,12 @@ class VersionService:
             'version_number': version.version_number,
             'version_name': version.version_name,
             'is_active': version.is_active,
-            'created_at': version.created_at.isoformat(),
-            'updated_at': version.updated_at.isoformat(),
+            'created_at': version.created_at,
+            'updated_at': version.updated_at,
             'created_by': version.created_by,
             'change_description': version.change_description,
             'previous_version_id': version.previous_version_id,
-            'config': {
+            'config': json.dumps({
                 'system_prompt': version.system_prompt,
                 'model': version.model,
                 'tools': {
@@ -263,10 +275,10 @@ class VersionService:
                     'custom_mcp': normalized_custom_mcps
                 },
                 'workflows': workflows
-            }
+            })
         }
         
-        result = await client.table('agent_versions').insert(data).execute()
+        result = await client.table('agent_versions').insert(data)
         
         if not result.data:
             raise Exception("Failed to create version")
@@ -339,15 +351,15 @@ class VersionService:
         
         version = version_result.data[0]
         
-        await client.table('agent_versions').update({
+        await client.table('agent_versions').eq('agent_id', agent_id).eq('is_active', True).update({
             'is_active': False,
-            'updated_at': datetime.now(timezone.utc).isoformat()
-        }).eq('agent_id', agent_id).eq('is_active', True).execute()
+            'updated_at': datetime.now(timezone.utc)
+        })
         
-        await client.table('agent_versions').update({
+        await client.table('agent_versions').eq('version_id', version_id).update({
             'is_active': True,
-            'updated_at': datetime.now(timezone.utc).isoformat()
-        }).eq('version_id', version_id).execute()
+            'updated_at': datetime.now(timezone.utc)
+        })
         
         version_count = await self._count_versions(agent_id)
         await self._update_agent_current_version(agent_id, version_id, version_count)
@@ -466,7 +478,7 @@ class VersionService:
             raise VersionNotFoundError(f"Version {version_id} not found")
         
         update_data = {
-            'updated_at': datetime.now(timezone.utc).isoformat()
+            'updated_at': datetime.now(timezone.utc)
         }
         
         if version_name is not None:
@@ -474,9 +486,7 @@ class VersionService:
         if change_description is not None:
             update_data['change_description'] = change_description
         
-        result = await client.table('agent_versions').update(update_data).eq(
-            'version_id', version_id
-        ).execute()
+        result = await client.table('agent_versions').eq('version_id', version_id).update(update_data)
         
         if not result.data:
             raise Exception("Failed to update version")
