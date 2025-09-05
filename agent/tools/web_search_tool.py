@@ -4,7 +4,7 @@ from dotenv import load_dotenv
 from agentpress.tool import Tool, ToolResult, openapi_schema, usage_example
 from utils.config import config
 from sandbox.tool_base import SandboxToolsBase
-from agentpress.thread_manager import ThreadManager
+from agentpress.thread_manager import ADKThreadManager
 import json
 import os
 import datetime
@@ -16,7 +16,7 @@ import logging
 class SandboxWebSearchTool(SandboxToolsBase):
     """Tool for performing web searches using Tavily API and web scraping using Firecrawl."""
 
-    def __init__(self, project_id: str, thread_manager: ThreadManager):
+    def __init__(self, project_id: str, thread_manager: ADKThreadManager):
         super().__init__(project_id, thread_manager)
         # Load environment variables
         load_dotenv()

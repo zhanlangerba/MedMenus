@@ -75,10 +75,10 @@ class ADKThreadManager:
         )
         self.context_manager = ContextManager()
         
-        # ADK 组件
-        self.llm_agent: Optional[LlmAgent] = None
-        self.runner: Optional[Runner] = None
-        self.session_service: Optional[DatabaseSessionService] = None
+        # # ADK 组件
+        # self.llm_agent: Optional[LlmAgent] = None
+        # self.runner: Optional[Runner] = None
+        # self.session_service: Optional[DatabaseSessionService] = None
 
     async def setup(self, thread_id: str, project_id: str, model_name: str, prompt: str, user_id: str):
         """设置 ADK 组件

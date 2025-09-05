@@ -453,10 +453,6 @@ class MessageManager:
             return {"role": "user", "content": temp_message_content_list}
         return None
 
-
-
-ADK_AVAILABLE = True
-
 class AgentRunner:
 
     def __init__(self, config: AgentConfig):
@@ -543,12 +539,12 @@ class AgentRunner:
                 enabled_tools = {}
             tool_manager.register_custom_tools(enabled_tools)
     
-    async def setup_mcp_tools(self) -> Optional[MCPToolWrapper]:
-        if not self.config.agent_config:
-            return None
+    # async def setup_mcp_tools(self) -> Optional[MCPToolWrapper]:
+    #     if not self.config.agent_config:
+    #         return None
         
-        mcp_manager = MCPManager(self.thread_manager, self.account_id)
-        return await mcp_manager.register_mcp_tools(self.config.agent_config)
+    #     mcp_manager = MCPManager(self.thread_manager, self.account_id)
+    #     return await mcp_manager.register_mcp_tools(self.config.agent_config)
     
     def get_max_tokens(self) -> Optional[int]:
         if "sonnet" in self.config.model_name.lower():
@@ -564,14 +560,14 @@ class AgentRunner:
     
     async def run(self) -> AsyncGenerator[Dict[str, Any], None]:
         await self.setup()
-        await self.setup_tools()
-        mcp_wrapper_instance = await self.setup_mcp_tools()
+        # await self.setup_tools()
+        # mcp_wrapper_instance = await self.setup_mcp_tools()
         
-        system_message = await PromptManager.build_system_prompt(
-            self.config.model_name, self.config.agent_config, 
-            self.config.is_agent_builder, self.config.thread_id, 
-            mcp_wrapper_instance
-        )
+        # system_message = await PromptManager.build_system_prompt(
+        #     self.config.model_name, self.config.agent_config, 
+        #     self.config.is_agent_builder, self.config.thread_id, 
+        #     mcp_wrapper_instance
+        # )
 
         system_message = await PromptManager.build_system_prompt(
             self.config.model_name, self.config.agent_config, 
