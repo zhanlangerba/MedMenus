@@ -19,8 +19,7 @@ from utils.simple_auth_middleware import get_current_user_id_from_jwt, get_user_
 from utils.logger import logger, structlog
 # from services.billing import check_billing_status, can_use_model
 from utils.config import config
-# from sandbox.sandbox import create_sandbox, delete_sandbox, get_or_start_sandbox
-from services.llm import make_llm_api_call
+from sandbox.sandbox import create_sandbox, delete_sandbox, get_or_start_sandbox
 # from run_agent_background import run_agent_background, _cleanup_redis_response_list, update_agent_run_status
 from run_agent_background import run_agent_background
 from utils.constants import MODEL_NAME_ALIASES
@@ -1083,47 +1082,7 @@ async def generate_and_update_project_name(project_id: str, prompt: str):
     logger.info(f"Starting background task to generate name for project: {project_id}")
     # TODO
     pass
-    # try:
-    #     # 1. 初始化数据库连接
-    #     db_conn = DBConnection()
-    #     client = await db_conn.client
-
-
-    #     model_name = "openai/gpt-4o-mini"
-    #     system_prompt = "You are a helpful assistant that generates extremely concise titles (2-4 words maximum) for chat threads based on the user's message. Respond with only the title, no other text or punctuation."
-    #     user_message = f"Generate an extremely brief title (2-4 words only) for a chat thread that starts with this message: \"{prompt}\""
-    #     messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_message}]
-
-    #     logger.debug(f"Calling LLM ({model_name}) for project {project_id} naming.")
-    #     response = await make_llm_api_call(messages=messages, model_name=model_name, max_tokens=20, temperature=0.7)
-
-    #     generated_name = None
-    #     if response and response.get('choices') and response['choices'][0].get('message'):
-    #         raw_name = response['choices'][0]['message'].get('content', '').strip()
-    #         cleaned_name = raw_name.strip('\'" \n\t')
-    #         if cleaned_name:
-    #             generated_name = cleaned_name
-    #             logger.info(f"LLM generated name for project {project_id}: '{generated_name}'")
-    #         else:
-    #             logger.warning(f"LLM returned an empty name for project {project_id}.")
-    #     else:
-    #         logger.warning(f"Failed to get valid response from LLM for project {project_id} naming. Response: {response}")
-
-    #     if generated_name:
-    #         # 修复数据库调用顺序：先设置条件，再调用update
-    #         update_result = await client.table('projects').eq("project_id", project_id).update({"name": generated_name})
-    #         if hasattr(update_result, 'data') and update_result.data:
-    #             logger.info(f"Successfully updated project {project_id} name to '{generated_name}'")
-    #         else:
-    #             logger.error(f"Failed to update project {project_id} name in database. Update result: {update_result}")
-    #     else:
-    #         logger.warning(f"No generated name, skipping database update for project {project_id}.")
-
-    # except Exception as e:
-    #     logger.error(f"Error in background naming task for project {project_id}: {str(e)}\n{traceback.format_exc()}")
-    # finally:
-    #     # No need to disconnect DBConnection singleton instance here
-    #     logger.info(f"Finished background naming task for project: {project_id}")
+    
 
 @router.post("/agent/initiate", response_model=InitiateAgentResponse)
 async def initiate_agent_with_files(
@@ -1178,7 +1137,6 @@ async def initiate_agent_with_files(
         model_name = config.MODEL_TO_USE
         logger.info(f"No model name provided, using default model: {model_name}")
 
-    logger.info(f"before model_name: {model_name}")
     # 处理模型名称，使其适配 LiteLLM 的模型定义规范， 如 deepseek-r1 → deepseek/deepseek-r1  claude-4-sonnet → anthropic/claude-4-sonnet gpt-5 → openai/gpt-5
     resolved_model = MODEL_NAME_ALIASES.get(model_name, model_name)
     # 更新model_name为解析后的版本
@@ -1276,11 +1234,11 @@ async def initiate_agent_with_files(
             logger.warning(f"User {user_id} not found default agent")
             
             # 自动创建FuFanManus默认Agent（兜底）
-            logger.info(f"1111111Creating FuFanManus default agent for user {user_id}")
+            logger.info(f"Creating FuFanManus default agent for user {user_id}")
             try:
                 from agent.fufanmanus.repository import FufanmanusAgentRepository
                 repository = FufanmanusAgentRepository()
-                agent_id = await repository.create_fufanmanus_agent_simple(user_id)
+                agent_id = await repository.create_fufanmanus_agent(user_id)
                 
                 if agent_id:
                     # 重新查询刚创建的默认Agent
@@ -1310,22 +1268,21 @@ async def initiate_agent_with_files(
     # 步骤5: 执行权限和限制检查
     logger.info(f"Executing permissions and limit checks")
     
-    # 并发执行所有检查
-    # model_check_task = asyncio.create_task(can_use_model(client, account_id, model_name))
-    # 检查结果并抛出相应的错误
-    # billing_check_task = asyncio.create_task(check_billing_status(client, account_id))
-    # limit_check_task = asyncio.create_task(check_agent_run_limit(client, account_id))
-
-    # 等待所有检查完成
-    # (can_use, model_message, allowed_models), (can_run, message, subscription), limit_check = await asyncio.gather(
-    #     model_check_task, billing_check_task, limit_check_task
-    # )
+    # TODO：这里可以添加模型检查，比如模型是否支持访问，用户是否有模型使用权限等，在业务层前做检查
+    # 如下是一系列的检查操作：比如
+    # 模型连通性：model connectivity check
+    # 模型使用权限：model access permission check
+    # 模型使用限制：model usage limit check
+    # 模型使用计费：model usage billing check
+    # 模型使用日志：model usage logging check
+    # 模型使用监控：model usage monitoring check
+    # 模型使用分析：model usage analysis check
 
     try:
         logger.info(f"Creating project and database record")
         
         # 5. 创建项目并生成项目ID,并插入到数据库中。注意：此操作仅用于初始化占位符
-        placeholder_name = f"{prompt[:30]}..." if len(prompt) > 30 else prompt if prompt else "新会话"
+        placeholder_name = f"{prompt[:30]}..." if len(prompt) > 30 else prompt if prompt else "new conversation"
         logger.info(f"New Project name: {placeholder_name}")
         
         project_id = str(uuid.uuid4())
@@ -1343,81 +1300,84 @@ async def initiate_agent_with_files(
             logger.error(f"Failed to create project")
             raise Exception("Failed to create project")
 
-        # # 2. 创建沙盒（懒加载）：只有在文件上传时才立即创建
-        # logger.info("  🏗️ 2. 处理沙盒创建")
-        # sandbox_id = None
-        # sandbox = None
-        # sandbox_pass = None
-        # vnc_url = None
-        # website_url = None
-        # token = None
+        # 创建沙盒（懒加载）：只有在文件上传时才立即创建
+        logger.info("Staring Creating sandbox environment")
 
-        # if files:
-        #     logger.info(f"  📁 检测到 {len(files)} 个文件，需要创建沙盒")
-        #     try:
-        #         logger.info("  🔧 开始创建沙盒...")
-        #         sandbox_pass = str(uuid.uuid4())
-        #         logger.info(f"    生成沙盒密码: {sandbox_pass}")
-                
-        #         sandbox = await create_sandbox(sandbox_pass, project_id)
-        #         sandbox_id = sandbox.id
-        #         logger.info(f"  ✅ 沙盒创建成功: {sandbox_id} (项目: {project_id})")
+        # 定义变量
+        sandbox_id = None
+        sandbox = None
+        sandbox_pass = None
+        vnc_url = None
+        website_url = None
+        token = None
 
-        #         # 获取预览链接
-        #         logger.info("  🔗 获取预览链接...")
-        #         vnc_link = await sandbox.get_preview_link(6080)
-        #         website_link = await sandbox.get_preview_link(8080)
+        if files:
+            logger.info(f"Found {len(files)} files, starting to create sandbox")
+            try:
+                logger.info("Starting to create sandbox...")
+                sandbox_pass = str(uuid.uuid4())
+                logger.info(f"Generated sandbox password: {sandbox_pass}")
                 
-        #         vnc_url = vnc_link.url if hasattr(vnc_link, 'url') else str(vnc_link).split("url='")[1].split("'")[0]
-        #         website_url = website_link.url if hasattr(website_link, 'url') else str(website_link).split("url='")[1].split("'")[0]
-                
-        #         token = None
-        #         if hasattr(vnc_link, 'token'):
-        #             token = vnc_link.token
-        #         elif "token='" in str(vnc_link):
-        #             token = str(vnc_link).split("token='")[1].split("'")[0]
-                
-        #         logger.info(f"    VNC URL: {vnc_url}")
-        #         logger.info(f"    Website URL: {website_url}")
-        #         logger.info(f"    Token: {token}")
 
-        #         # 更新项目信息
-        #         logger.info("  📝 更新项目沙盒信息...")
-        #         update_result = await client.table('projects').update({
-        #             'sandbox': {
-        #                 'id': sandbox_id, 
-        #                 'pass': sandbox_pass, 
-        #                 'vnc_preview': vnc_url,
-        #                 'sandbox_url': website_url, 
-        #                 'token': token
-        #             }
-        #         }).eq('project_id', project_id).execute()
+                sandbox = await create_sandbox(sandbox_pass, project_id)
+                sandbox_id = sandbox.id
+                logger.info(f"Created sandbox successfully: {sandbox_id} (project: {project_id})")
 
-        #         if not update_result.data:
-        #             logger.error(f"  ❌ 更新项目 {project_id} 沙盒信息失败")
-        #             if sandbox_id:
-        #                 try: 
-        #                     await delete_sandbox(sandbox_id)
-        #                     logger.info(f"  🗑️ 已删除沙盒 {sandbox_id}")
-        #                 except Exception as e: 
-        #                     logger.error(f"  ❌ 删除沙盒失败: {str(e)}")
-        #             raise Exception("Database update failed")
+                # 获取预览链接
+                logger.info("Getting preview link...")
+                vnc_link = await sandbox.get_preview_link(6080)
+                website_link = await sandbox.get_preview_link(8080)
+                
+                vnc_url = vnc_link.url if hasattr(vnc_link, 'url') else str(vnc_link).split("url='")[1].split("'")[0]
+                website_url = website_link.url if hasattr(website_link, 'url') else str(website_link).split("url='")[1].split("'")[0]
+                
+                token = None
+                if hasattr(vnc_link, 'token'):
+                    token = vnc_link.token
+                elif "token='" in str(vnc_link):
+                    token = str(vnc_link).split("token='")[1].split("'")[0]
+                
+                logger.info(f"Sandbox VNC URL: {vnc_url}")
+                logger.info(f"Sandbox Website URL: {website_url}")
+                logger.info(f"Sandbox Token: {token}")
+
+                # 更新项目信息
+                logger.info("Updating project sandbox information...")
+                update_result = await client.table('projects').update({
+                    'sandbox': {
+                        'id': sandbox_id, 
+                        'pass': sandbox_pass, 
+                        'vnc_preview': vnc_url,
+                        'sandbox_url': website_url, 
+                        'token': token
+                    }
+                }).eq('project_id', project_id).execute()
+
+                if not update_result.data:
+                    logger.error(f"Failed to update project {project_id} sandbox information")
+                    if sandbox_id:
+                        try: 
+                            await delete_sandbox(sandbox_id)
+                            logger.info(f"Deleted sandbox {sandbox_id}")
+                        except Exception as e: 
+                            logger.error(f"Failed to delete sandbox: {str(e)}")
+                    raise Exception("Database update failed")
                     
-        #         logger.info("  ✅ 项目沙盒信息更新成功")
+                logger.info("Project sandbox information updated successfully")
                 
-        #     except Exception as e:
-        #         logger.error(f"  ❌ 创建沙盒失败: {str(e)}")
-        #         logger.info("  🗑️ 清理已创建的项目...")
-        #         await client.table('projects').delete().eq('project_id', project_id).execute()
-        #         if sandbox_id:
-        #             try: 
-        #                 await delete_sandbox(sandbox_id)
-        #                 logger.info(f"  🗑️ 已删除沙盒 {sandbox_id}")
-        #             except Exception:
-        #                 pass
-        #         raise Exception("Failed to create sandbox")
-        # else:
-        #     logger.info("  ⏭️ 无文件上传，跳过沙盒创建")
+            except Exception as e:
+                logger.error(f"Failed to create sandbox: {str(e)}")
+                logger.info("Cleaning up created project...")
+                await client.table('projects').delete().eq('project_id', project_id).execute()
+                if sandbox_id:
+                    try: 
+                        await delete_sandbox(sandbox_id)
+                        logger.info(f"Deleted sandbox {sandbox_id}")
+                    except Exception:
+                        pass
+                raise Exception("Failed to create sandbox")
+        else:
+            logger.info("No files uploaded, skipping sandbox creation")
 
         # 6. 创建线程（thread_id）并做关联
         thread_id = str(uuid.uuid4())
@@ -1447,15 +1407,15 @@ async def initiate_agent_with_files(
             )
         
         # # 如果是Agent构建器会话，存储构建器元数据
-        # if is_agent_builder:
-        #     print(f"  🔧 存储Agent构建器元数据: target_agent_id={target_agent_id}")
-        #     thread_data["metadata"] = {
-        #         "is_agent_builder": True,
-        #         "target_agent_id": target_agent_id
-        #     }
-        #     structlog.contextvars.bind_contextvars(
-        #         target_agent_id=target_agent_id,
-        #     )
+        if is_agent_builder:
+            print(f"  🔧 存储Agent构建器元数据: target_agent_id={target_agent_id}")
+            thread_data["metadata"] = {
+                "is_agent_builder": True,
+                "target_agent_id": target_agent_id
+            }
+            structlog.contextvars.bind_contextvars(
+                target_agent_id=target_agent_id,
+            )
         
         # 插入线程到数据库
         thread = await client.schema('public').table('threads').insert(thread_data)
@@ -1466,109 +1426,102 @@ async def initiate_agent_with_files(
             
 
         # 在创建新的Agent会话时异步触发，通过大模型生成更贴合主题的会话名称 
+        # TODO：可选。这里可以添加一个任务，通过大模型生成更贴合主题的会话名称，并更新到项目中
         asyncio.create_task(generate_and_update_project_name(project_id=project_id, prompt=prompt))
 
         message_content = prompt    
-        # TODO：处理上传文件到沙盒（如果有）
-        # if files:
-        #     logger.info(f"  📤 开始上传 {len(files)} 个文件...")
-        #     successful_uploads = []
-        #     failed_uploads = []
+        # 处理上传文件到沙盒环境（如果有）
+        if files:
+            logger.info(f"Start uploading {len(files)} files to sandbox...")
+            successful_uploads = []
+            failed_uploads = []
             
-        #     for i, file in enumerate(files):
-        #         logger.info(f"  📄 处理文件 {i+1}/{len(files)}: {file.filename}")
+            for i, file in enumerate(files):
+                logger.info(f"Processing file {i+1}/{len(files)}: {file.filename}")
                 
-        #         if file.filename:
-        #             try:
-        #                 safe_filename = file.filename.replace('/', '_').replace('\\', '_')
-        #                 target_path = f"/workspace/{safe_filename}"
-        #                 logger.info(f"    🎯 目标路径: {target_path}")
-        #                 logger.info(f"    📊 文件大小: {file.size if hasattr(file, 'size') else '未知'} bytes")
+                if file.filename:
+                    try:
+                        safe_filename = file.filename.replace('/', '_').replace('\\', '_')
+                        target_path = f"/workspace/{safe_filename}"
+                        logger.info(f"    🎯 目标路径: {target_path}")
+                        logger.info(f"    📊 文件大小: {file.size if hasattr(file, 'size') else '未知'} bytes")
                         
-        #                 content = await file.read()
-        #                 logger.info(f"    📖 读取文件内容完成，大小: {len(content)} bytes")
+                        content = await file.read()
+                        logger.info(f"    📖 读取文件内容完成，大小: {len(content)} bytes")
                         
-        #                 upload_successful = False
-        #                 try:
-        #                     if hasattr(sandbox, 'fs') and hasattr(sandbox.fs, 'upload_file'):
-        #                         logger.info(f"    🔄 开始上传到沙盒 {sandbox_id}...")
-        #                         await sandbox.fs.upload_file(content, target_path)
-        #                         logger.info(f"    ✅ 沙盒上传调用成功: {target_path}")
-        #                         upload_successful = True
-        #                     else:
-        #                         logger.error(f"    ❌ 沙盒对象缺少上传方法")
-        #                         raise NotImplementedError("Suitable upload method not found on sandbox object.")
-        #                 except Exception as upload_error:
-        #                     logger.error(f"    ❌ 沙盒上传失败 {safe_filename}: {str(upload_error)}", exc_info=True)
+                        upload_successful = False
+                        try:
+                            if hasattr(sandbox, 'fs') and hasattr(sandbox.fs, 'upload_file'):
+                                logger.info(f"    🔄 开始上传到沙盒 {sandbox_id}...")
+                                await sandbox.fs.upload_file(content, target_path)
+                                logger.info(f"    ✅ 沙盒上传调用成功: {target_path}")
+                                upload_successful = True
+                            else:
+                                logger.error(f"    ❌ 沙盒对象缺少上传方法")
+                                raise NotImplementedError("Suitable upload method not found on sandbox object.")
+                        except Exception as upload_error:
+                            logger.error(f"    ❌ 沙盒上传失败 {safe_filename}: {str(upload_error)}", exc_info=True)
 
-        #                 if upload_successful:
-        #                     try:
-        #                         logger.info(f"    🔍 验证文件上传...")
-        #                         await asyncio.sleep(0.2)
-        #                         parent_dir = os.path.dirname(target_path)
-        #                         files_in_dir = await sandbox.fs.list_files(parent_dir)
-        #                         file_names_in_dir = [f.name for f in files_in_dir]
+                        if upload_successful:
+                            try:
+                                logger.info(f"    🔍 验证文件上传...")
+                                await asyncio.sleep(0.2)
+                                parent_dir = os.path.dirname(target_path)
+                                files_in_dir = await sandbox.fs.list_files(parent_dir)
+                                file_names_in_dir = [f.name for f in files_in_dir]
                                 
-        #                         if safe_filename in file_names_in_dir:
-        #                             successful_uploads.append(target_path)
-        #                             logger.info(f"    ✅ 文件上传并验证成功: {safe_filename} -> {target_path}")
-        #                         else:
-        #                             logger.error(f"    ❌ 文件验证失败: {safe_filename} 在 {parent_dir} 中未找到")
-        #                             failed_uploads.append(safe_filename)
-        #                     except Exception as verify_error:
-        #                         logger.error(f"    ❌ 文件验证错误 {safe_filename}: {str(verify_error)}", exc_info=True)
-        #                         failed_uploads.append(safe_filename)
-        #                 else:
-        #                     failed_uploads.append(safe_filename)
-        #             except Exception as file_error:
-        #                 logger.error(f"    ❌ 处理文件失败 {file.filename}: {str(file_error)}", exc_info=True)
-        #                 failed_uploads.append(file.filename)
-        #             finally:
-        #                 await file.close()
-        #                 logger.info(f"    🔒 文件已关闭: {file.filename}")
+                                if safe_filename in file_names_in_dir:
+                                    successful_uploads.append(target_path)
+                                    logger.info(f"    ✅ 文件上传并验证成功: {safe_filename} -> {target_path}")
+                                else:
+                                    logger.error(f"    ❌ 文件验证失败: {safe_filename} 在 {parent_dir} 中未找到")
+                                    failed_uploads.append(safe_filename)
+                            except Exception as verify_error:
+                                logger.error(f"    ❌ 文件验证错误 {safe_filename}: {str(verify_error)}", exc_info=True)
+                                failed_uploads.append(safe_filename)
+                        else:
+                            failed_uploads.append(safe_filename)
+                    except Exception as file_error:
+                        logger.error(f"    ❌ 处理文件失败 {file.filename}: {str(file_error)}", exc_info=True)
+                        failed_uploads.append(file.filename)
+                    finally:
+                        await file.close()
+                        logger.info(f"    🔒 文件已关闭: {file.filename}")
 
-        #     # 更新消息内容
-        #     if successful_uploads:
-        #         message_content += "\n\n" if message_content else ""
-        #         for file_path in successful_uploads: 
-        #             message_content += f"[Uploaded File: {file_path}]\n"
-        #         logger.info(f"  ✅ 成功上传 {len(successful_uploads)} 个文件")
+            # 更新消息内容
+            if successful_uploads:
+                message_content += "\n\n" if message_content else ""
+                for file_path in successful_uploads: 
+                    message_content += f"[Uploaded File: {file_path}]\n"
+                logger.info(f"  ✅ 成功上传 {len(successful_uploads)} 个文件")
                 
-        #     if failed_uploads:
-        #         message_content += "\n\nThe following files failed to upload:\n"
-        #         for failed_file in failed_uploads: 
-        #             message_content += f"- {failed_file}\n"
-        #         logger.warning(f"  ⚠️ 上传失败 {len(failed_uploads)} 个文件")
+            if failed_uploads:
+                message_content += "\n\nThe following files failed to upload:\n"
+                for failed_file in failed_uploads: 
+                    message_content += f"- {failed_file}\n"
+                logger.warning(f"  ⚠️ 上传失败 {len(failed_uploads)} 个文件")
                 
-        #     logger.info(f"  📝 最终消息内容: {message_content}")
-        # else:
-        #     logger.info("  ⏭️ 无文件需要上传")
+            logger.info(f"  📝 最终消息内容: {message_content}")
+        else:
+            logger.info("  ⏭️ 无文件需要上传")
 
-        
-     
-        # 5. 添加初始用户消息到线程
+        # 添加初始用户消息到线程
         message_payload = {"role": "user", "content": message_content}
         logger.info(f"New Message payload: {message_payload}")
         
         # 在ADK架构中，使用thread_id作为session_id
-        # 这样可以保持与现有前端逻辑的兼容性
         adk_session_id = thread_id
         
         # 创建ADK session（如果不存在）
         await _create_adk_session_if_not_exists(client, user_id, adk_session_id)
         logger.info(f"Created ADK session successfully: {adk_session_id}")
 
-        # # 使用ADK events表记录消息 --- 需要删除
+        # # 使用ADK events表记录消息
         message_id = str(uuid.uuid4())
         await _log_adk_user_message_event(client, user_id, message_content, adk_session_id, message_id)
         logger.info(f"User message event recorded successfully: {message_id}")
         
-        # 🔗 设置手动消息ID到上下文中，供ADK回调使用
-        from services.llm import set_manual_message_id
-        set_manual_message_id(message_id)
-
-        # 7. 确定最终使用的模型
-        
+        # 确定最终使用的模型
         # 模型选择的优先级逻辑
         # model_name ：用户在前端选择的模型
         # agent_config.model ：用户在Agent配置中选择的模型
@@ -1631,7 +1584,7 @@ async def initiate_agent_with_files(
         except Exception as e:
             logger.error(f"Redis registered failed ({instance_key}): {str(e)}")
 
-        # 10. 获取请求ID并启动后台Agent
+        # 获取请求ID并启动后台Agent
         request_id = structlog.contextvars.get_contextvars().get('request_id')
         logger.info(f"Request ID: {request_id}")
 
@@ -1652,27 +1605,16 @@ async def initiate_agent_with_files(
                 is_agent_builder=is_agent_builder,
                 target_agent_id=target_agent_id,
                 request_id=request_id,
-                # manual_message_id=message_id,  # ✅ 不再需要，使用上下文变量传递
             )
-            print(f"  ✅ Agent运行任务已发送到后台，消息ID: {message.message_id}")
-            logger.info(f"  ✅ Agent运行任务已发送到后台，消息ID: {message.message_id}")
+            logger.info(f"Agent run task sent to background, message ID: {message.message_id}")
         except Exception as send_error:
-            print(f"  ❌ 发送后台任务失败: {send_error}")
-            logger.error(f"  ❌ 发送后台任务失败: {send_error}")
-            # 继续执行，不中断请求
+            logger.error(f"Failed to send background task: {send_error}")
 
-        # 返回结果
-        result = {"thread_id": thread_id, "agent_run_id": agent_run_id}
-        logger.info(f"🎉 ===== /agent/initiate 处理完成 =====")
-        logger.info(f"📋 返回结果: {result}")
-        return result
+        return {"thread_id": thread_id, "agent_run_id": agent_run_id}
 
     except Exception as e:
         logger.error(f"Error in agent initiation: {str(e)}\n{traceback.format_exc()}")
-        # TODO: Clean up created project/thread if initiation fails mid-way
         raise HTTPException(status_code=500, detail=f"Failed to initiate agent session: {str(e)}")
-
-
 
 # Custom agents
 @router.get("/agents", response_model=AgentsResponse)
@@ -4203,10 +4145,11 @@ async def _log_adk_user_message_event(client, user_id: str, message_content: str
         import uuid
         import pickle
         from datetime import datetime
+
         event_id = str(uuid.uuid4())
         invocation_id = str(uuid.uuid4())
         
-        # ✅ 使用 ADK 标准格式（ADK 不接受 content 字段，只接受 parts）
+        # 使用 ADK 标准格式（ADK 不接受 content 字段，只接受 parts）
         content = {
             "role": "user", 
             "parts": [{"text": message_content}]  # ADK 标准格式

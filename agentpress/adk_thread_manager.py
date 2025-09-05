@@ -11,11 +11,15 @@ from utils.logger import logger
 from agentpress.tool_registry import ToolRegistry
 from agentpress.context_manager import ContextManager
 from agentpress.response_processor import ResponseProcessor, ProcessorConfig
+from agentpress.tool import Tool
+
 
 ADK_AVAILABLE = True
-from google.adk.agents.llm_agent import LlmAgent
-from google.adk.runners import Runner
-from google.adk.sessions import DatabaseSessionService
+from google.adk.agents.llm_agent import LlmAgent # type: ignore
+from google.adk.runners import Runner # type: ignore
+from google.adk.sessions import DatabaseSessionService # type: ignore
+from google.adk.tools.base_tool import BaseTool # type: ignore
+
 
 try:
     from langfuse.client import StatefulGenerationClient, StatefulTraceClient # type: ignore
@@ -76,9 +80,6 @@ class ADKThreadManager:
         self.runner: Optional[Runner] = None
         self.session_service: Optional[DatabaseSessionService] = None
 
-        # 工具列表
-        # self.tools: List[BaseTool] = []
-
     async def setup(self, thread_id: str, project_id: str, model_name: str, prompt: str, user_id: str):
         """设置 ADK 组件
 
@@ -135,41 +136,28 @@ class ADKThreadManager:
             logger.error(f"Failed to setup ADK ThreadManager: {e}")
             raise
 
-    # def add_tool(self, tool_class: Type, function_names: Optional[List[str]] = None, **kwargs):
-    #     """添加工具到 ADK
+    def add_tool(self, tool_class: Type[Tool], function_names: Optional[List[str]] = None, **kwargs):
+        """Add a tool to the ThreadManager."""
+        self.tool_registry.register_tool(tool_class, function_names, **kwargs)
 
-    #     Args:
-    #         tool_class: 工具类
-    #         function_names: 函数名称列表
-    #         **kwargs: 其他参数
-    #     """
-    #     try:
-    #         # 转换为 ADK 工具格式
-    #         adk_tool = self._convert_tool_to_adk(tool_class, **kwargs)
-    #         if adk_tool:
-    #             self.tools.append(adk_tool)
-    #             logger.info(f"Added tool {tool_class.__name__} to ADK agent")
-    #     except Exception as e:
-    #         logger.error(f"Failed to add tool {tool_class.__name__}: {e}")
+    def _convert_tool_to_adk(self, tool_class: Type, **kwargs) -> Optional[BaseTool]:
+        """将工具转换为 ADK 格式
 
-    # def _convert_tool_to_adk(self, tool_class: Type, **kwargs) -> Optional[BaseTool]:
-    #     """将工具转换为 ADK 格式
+        Args:
+            tool_class: 工具类
+            **kwargs: 工具参数
 
-    #     Args:
-    #         tool_class: 工具类
-    #         **kwargs: 工具参数
-
-    #     Returns:
-    #         ADK 工具实例
-    #     """
-    #     try:
-    #         # 这里需要根据具体的工具类实现转换逻辑
-    #         # 暂时返回 None，后续可以根据需要实现具体的转换
-    #         logger.debug(f"Converting tool {tool_class.__name__} to ADK format")
-    #         return None
-    #     except Exception as e:
-    #         logger.error(f"Failed to convert tool {tool_class.__name__}: {e}")
-    #         return None
+        Returns:
+            ADK 工具实例
+        """
+        try:
+            # 这里需要根据具体的工具类实现转换逻辑
+            # 暂时返回 None，后续可以根据需要实现具体的转换
+            logger.debug(f"Converting tool {tool_class.__name__} to ADK format")
+            return None
+        except Exception as e:
+            logger.error(f"Failed to convert tool {tool_class.__name__}: {e}")
+            return None
 
     async def get_llm_messages(self, thread_id: str) -> List[Dict[str, Any]]:
         """Get all messages for a thread from events table.
@@ -281,7 +269,6 @@ class ADKThreadManager:
         except Exception as e:
             logger.error(f"Failed to get messages for thread {thread_id}: {str(e)}", exc_info=True)
             return []
-
 
     async def run_thread(
         self,
@@ -783,9 +770,6 @@ class ADKThreadManager:
                     
         # except Exception as e:
         #     print(f"ADK thread execution failed: {e}")
-
-
-
 
     async def create_thread(
         self,

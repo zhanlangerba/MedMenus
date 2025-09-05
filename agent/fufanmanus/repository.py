@@ -172,7 +172,7 @@ class FufanmanusAgentRepository:
             logger.error(f"Failed to get agent stats: {e}")
             return {"error": str(e)}
     
-    async def create_fufanmanus_agent_simple(
+    async def create_fufanmanus_agent(
         self, 
         user_id: str,
     ) -> str:

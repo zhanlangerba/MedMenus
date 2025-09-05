@@ -68,7 +68,7 @@ async def start_supervisord_session(sandbox: AsyncSandbox):
         logger.info(f"Creating session {session_id} for supervisord")
         await sandbox.process.create_session(session_id)
         
-        # Execute supervisord command
+        # 执行 supervisord 命令
         await sandbox.process.execute_session_command(session_id, SessionExecuteRequest(
             command="exec /usr/bin/supervisord -n -c /etc/supervisor/conf.d/supervisord.conf",
             var_async=True
@@ -89,6 +89,7 @@ async def create_sandbox(password: str, project_id: str = None) -> AsyncSandbox:
         logger.debug(f"Using sandbox_id as label: {project_id}")
         labels = {'id': project_id}
         
+    # 参考：https://www.daytona.io/docs/en/python-sdk/async/async-daytona/
     params = CreateSandboxFromSnapshotParams(
         snapshot=Configuration.SANDBOX_SNAPSHOT_NAME,
         public=True,
@@ -115,11 +116,11 @@ async def create_sandbox(password: str, project_id: str = None) -> AsyncSandbox:
         auto_archive_interval=2 * 60,
     )
     
-    # Create the sandbox
+    # 创建沙盒
     sandbox = await daytona.create(params)
     logger.debug(f"Sandbox created with ID: {sandbox.id}")
     
-    # Start supervisord in a session for new sandbox
+    # 启动 supervisord supervisord 是一个进程控制系统，用于在 Docker 容器中管理和监控多个进程)
     await start_supervisord_session(sandbox)
     
     logger.debug(f"Sandbox environment successfully initialized")

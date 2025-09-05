@@ -87,7 +87,6 @@ async def run_agent_background(
     is_agent_builder: Optional[bool] = False,
     target_agent_id: Optional[str] = None,
     request_id: Optional[str] = None,
-    # manual_message_id: Optional[str] = None,  # ✅ 不再需要，使用上下文变量
 ):
     """Run the agent in the background using Redis for state."""
     if agent_config:
@@ -164,7 +163,7 @@ async def run_agent_background(
         logger.error(f"Sentry tag setting failed: {sentry_error}")
         logger.error(f"Error details: {traceback.format_exc()}")
         logger.warning(f"Sentry tag setting failed: {sentry_error}")
-        # 继续执行，不中断流程
+
 
     try:
         logger.info(f"Starting background agent run: {agent_run_id} for thread: {thread_id} (Instance: {instance_id})")
