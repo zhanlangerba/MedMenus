@@ -56,7 +56,7 @@ class AgentConfig:
     thread_id: str
     project_id: str
     stream: bool
-    native_max_auto_continues: int = 0
+    native_max_auto_continues: int = 25
     max_iterations: int = 100
     model_name: str = "deepseek/deepseek-chat"
     enable_thinking: Optional[bool] = False
@@ -659,7 +659,7 @@ class AgentRunner:
                         llm_max_tokens=1024,
                         tool_choice="auto",
                         available_functions = available_functions,
-                        max_xml_tool_calls=1,
+                        max_xml_tool_calls=0, # 这里不设置限制
                         temporary_message=temporary_message,
                         processor_config=ProcessorConfig(
                             xml_tool_calling=True,

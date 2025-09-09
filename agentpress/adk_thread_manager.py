@@ -772,16 +772,21 @@ class ADKThreadManager:
         agent_id: Optional[str] = None,
         agent_version_id: Optional[str] = None
     ):
-        """添加消息到线程（与 ThreadManager 保持接口一致）
+        """Add a message to the thread in the database.
 
         Args:
-            thread_id: 线程ID
-            type: 消息类型
-            content: 消息内容
-            is_llm_message: 是否为LLM消息
-            metadata: 元数据
-            agent_id: 代理ID（暂不支持，存储在metadata中）
-            agent_version_id: 代理版本ID（暂不支持，存储在metadata中）
+            thread_id: The ID of the thread to add the message to.
+            type: The type of the message (e.g., 'text', 'image_url', 'tool_call', 'tool', 'user', 'assistant').
+            content: The content of the message. Can be a dictionary, list, or string.
+                     It will be stored as JSONB in the database.
+            is_llm_message: Flag indicating if the message originated from the LLM.
+                            Defaults to False (user message).
+            metadata: Optional dictionary for additional message metadata.
+                      Defaults to None, stored as an empty JSONB object if None.
+            agent_id: Optional ID of the agent associated with this message.
+                     Stored directly in agent_id column.
+            agent_version_id: Optional ID of the specific agent version used.
+                             Stored directly in agent_version_id column.
         """
         logger.debug(f"Adding message of type '{type}' to thread {thread_id} (agent: {agent_id}, version: {agent_version_id})")
         client = await self.db.client
@@ -791,19 +796,17 @@ class ADKThreadManager:
             'thread_id': thread_id,
             'project_id': '00000000-0000-0000-0000-000000000000',  # 临时使用默认project_id
             'type': type,
+            'is_llm_message': is_llm_message,
             'role': 'assistant' if type == 'assistant' else 'user' if type == 'user' else 'system',
             'content': json.dumps(content) if isinstance(content, (dict, list)) else str(content),
             'metadata': json.dumps(metadata) if metadata else '{}',
         }
         
-        # 将代理信息存储在metadata中（因为messages表没有agent_id和agent_version_id字段）
-        if agent_id or agent_version_id:
-            metadata_dict = json.loads(data_to_insert['metadata']) if data_to_insert['metadata'] != '{}' else {}
-            if agent_id:
-                metadata_dict['agent_id'] = agent_id
-            if agent_version_id:
-                metadata_dict['agent_version_id'] = agent_version_id
-            data_to_insert['metadata'] = json.dumps(metadata_dict)
+        # 直接添加agent信息到字段中
+        if agent_id:
+            data_to_insert['agent_id'] = agent_id
+        if agent_version_id:
+            data_to_insert['agent_version_id'] = agent_version_id
 
         try:
             # 插入消息

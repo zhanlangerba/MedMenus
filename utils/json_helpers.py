@@ -161,21 +161,21 @@ def format_for_yield(message_object: Dict[str, Any]) -> Dict[str, Any]:
     if not message_object:
         return message_object
         
-    # Create a copy to avoid modifying the original
+    # 创建一个副本，避免修改原始对象
     formatted = message_object.copy()
     
-    # Convert UUID objects to strings
+    # 将 UUID 对象转换为字符串
     for key, value in formatted.items():
-        if hasattr(value, 'hex'):  # UUID objects have hex attribute
+        if hasattr(value, 'hex'):  # UUID 对象有 hex 属性
             formatted[key] = str(value)
         elif isinstance(value, datetime):
             formatted[key] = value.isoformat()
     
-    # Ensure content is a JSON string
+    # 确保 content 是 JSON 字符串
     if 'content' in formatted and not isinstance(formatted['content'], str):
         formatted['content'] = json.dumps(formatted['content'])
         
-    # Ensure metadata is a JSON string
+    # 确保 metadata 是 JSON 字符串
     if 'metadata' in formatted and not isinstance(formatted['metadata'], str):
         formatted['metadata'] = json.dumps(formatted['metadata'])
         
