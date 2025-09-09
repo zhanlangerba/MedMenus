@@ -1,7 +1,8 @@
 import os
 import urllib.parse
+import json
 from typing import Optional
-
+from utils.simple_auth_middleware import get_current_user_id_from_jwt, get_user_id_from_stream_auth, verify_thread_access
 from fastapi import FastAPI, UploadFile, File, HTTPException, APIRouter, Form, Depends, Request
 from fastapi.responses import Response
 from pydantic import BaseModel
@@ -9,8 +10,8 @@ from daytona_sdk import AsyncSandbox
 
 from sandbox.sandbox import get_or_start_sandbox, delete_sandbox
 from utils.logger import logger
-from utils.auth_utils import get_optional_user_id
-from services.supabase import DBConnection
+# from utils.auth_utils import get_optional_user_id
+from services.postgresql import DBConnection
 
 # Initialize shared resources
 router = APIRouter(tags=["sandbox"])
@@ -147,7 +148,7 @@ async def create_file(
     path: str = Form(...),
     file: UploadFile = File(...),
     request: Request = None,
-    user_id: Optional[str] = Depends(get_optional_user_id)
+    user_id: str = Depends(get_current_user_id_from_jwt)
 ):
     """Create a file in the sandbox using direct file upload"""
     # Normalize the path to handle UTF-8 encoding correctly
@@ -175,12 +176,52 @@ async def create_file(
         logger.error(f"Error creating file in sandbox {sandbox_id}: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.get("/sandboxes/{sandbox_id}/files")
-async def list_files(
+@router.get("/sandboxes/{sandbox_data:path}/files")
+async def list_files_with_json_compatibility(
+    sandbox_data: str,
+    path: str,
+    request: Request = None,
+    user_id: str = Depends(get_current_user_id_from_jwt)
+):
+    """
+    处理前端传来的沙箱文件列表请求 - 兼容JSON对象路径格式
+    支持两种格式:
+    1. 正常格式: /api/sandboxes/{sandbox_id}/files
+    2. JSON格式: /api/sandboxes/{"id":"xxx",...}/files
+    """
+    # 尝试解析为JSON对象（前端错误格式）
+    sandbox_id = None
+    try:
+        # 检查是否是JSON格式
+        if sandbox_data.startswith('{') and sandbox_data.endswith('}'):
+            logger.info(f"🔧 检测到JSON格式的sandbox参数（文件列表），正在解析...")
+            sandbox_obj = json.loads(sandbox_data)
+            sandbox_id = sandbox_obj.get('id')
+            logger.info(f"✅ 成功从JSON中提取sandbox_id: {sandbox_id}")
+        else:
+            # 普通的sandbox_id格式
+            sandbox_id = sandbox_data
+            logger.info(f"📝 使用普通格式的sandbox_id: {sandbox_id}")
+    except json.JSONDecodeError as e:
+        logger.error(f"❌ JSON解析失败: {e}")
+        # 降级到普通字符串处理
+        sandbox_id = sandbox_data
+    except Exception as e:
+        logger.error(f"❌ 处理sandbox参数时出错: {e}")
+        raise HTTPException(status_code=400, detail="Invalid sandbox parameter format")
+    
+    if not sandbox_id:
+        raise HTTPException(status_code=400, detail="Sandbox ID not found in parameter")
+    
+    # 调用原有的文件列表逻辑
+    return await _list_files_internal(sandbox_id, path, request, user_id)
+
+
+async def _list_files_internal(
     sandbox_id: str, 
     path: str,
     request: Request = None,
-    user_id: Optional[str] = Depends(get_optional_user_id)
+    user_id: str = None
 ):
     """List files and directories at the specified path"""
     # Normalize the path to handle UTF-8 encoding correctly
@@ -220,12 +261,104 @@ async def list_files(
         logger.error(f"Error listing files in sandbox {sandbox_id}: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.get("/sandboxes/{sandbox_id}/files/content")
-async def read_file(
+@router.get("/sandboxes/{sandbox_data:path}/files/content")
+async def read_file_with_json_compatibility(
+    sandbox_data: str,
+    path: str,
+    request: Request = None,
+    user_id: str = Depends(get_current_user_id_from_jwt)
+):
+    """
+    处理前端传来的沙箱文件读取请求 - 兼容JSON对象路径格式
+    支持两种格式:
+    1. 正常格式: /api/sandboxes/{sandbox_id}/files/content?path=xxx
+    2. JSON格式: /api/sandboxes/{"id":"xxx",...}/files/content?path=xxx
+    """
+    return await _handle_file_request(sandbox_data, path, request, user_id, "read")
+
+
+@router.get("/sandboxes/{malformed_url:path}")
+async def handle_malformed_file_url(
+    malformed_url: str,
+    request: Request = None,
+    user_id: str = Depends(get_current_user_id_from_jwt)
+):
+    """
+    处理前端发送的错误URL格式，例如:
+    /sandboxes/{...}/files/content&path=xxx (使用&而不是?)
+    """
+    logger.info(f"🔧 收到错误格式URL: {malformed_url}")
+    
+    # 检查是否是files/content&path=格式
+    if "/files/content&path=" in malformed_url:
+        # 分离sandbox_data和path
+        parts = malformed_url.split("/files/content&path=", 1)
+        if len(parts) == 2:
+            sandbox_data = parts[0]
+            path = urllib.parse.unquote(parts[1])
+            logger.info(f"🔧 解析出sandbox_data: {sandbox_data}, path: {path}")
+            return await _handle_file_request(sandbox_data, path, request, user_id, "read")
+    
+    # 检查是否是files&path=格式
+    if "/files&path=" in malformed_url:
+        parts = malformed_url.split("/files&path=", 1) 
+        if len(parts) == 2:
+            sandbox_data = parts[0]
+            path = urllib.parse.unquote(parts[1])
+            logger.info(f"🔧 解析出sandbox_data: {sandbox_data}, path: {path}")
+            return await _handle_file_request(sandbox_data, path, request, user_id, "list")
+    
+    raise HTTPException(status_code=404, detail="Invalid URL format")
+
+
+async def _handle_file_request(
+    sandbox_data: str,
+    path: str,
+    request: Request,
+    user_id: str,
+    action: str  # "read" or "list"
+):
+    """
+    统一处理文件请求（读取或列表），支持JSON格式的sandbox参数
+    """
+    # 尝试解析sandbox_data
+    sandbox_id = None
+    try:
+        # 检查是否是JSON格式
+        if sandbox_data.startswith('{') and sandbox_data.endswith('}'):
+            logger.info(f"🔧 检测到JSON格式的sandbox参数，正在解析...")
+            sandbox_obj = json.loads(sandbox_data)
+            sandbox_id = sandbox_obj.get('id')
+            logger.info(f"✅ 成功从JSON中提取sandbox_id: {sandbox_id}")
+        else:
+            # 普通字符串格式
+            sandbox_id = sandbox_data
+            logger.info(f"📝 使用普通格式sandbox_id: {sandbox_id}")
+    except json.JSONDecodeError as e:
+        logger.error(f"❌ JSON解析失败: {e}")
+        # 降级到普通字符串处理
+        sandbox_id = sandbox_data
+    except Exception as e:
+        logger.error(f"❌ 处理sandbox参数时出错: {e}")
+        raise HTTPException(status_code=400, detail="Invalid sandbox parameter format")
+    
+    if not sandbox_id:
+        raise HTTPException(status_code=400, detail="Sandbox ID not found in parameter")
+    
+    # 根据action类型调用相应的处理函数
+    if action == "read":
+        return await _read_file_internal(sandbox_id, path, request, user_id)
+    elif action == "list":
+        return await _list_files_internal(sandbox_id, path, request, user_id)
+    else:
+        raise HTTPException(status_code=400, detail="Invalid action type")
+
+
+async def _read_file_internal(
     sandbox_id: str, 
     path: str,
     request: Request = None,
-    user_id: Optional[str] = Depends(get_optional_user_id)
+    user_id: str = None
 ):
     """Read a file from the sandbox"""
     # Normalize the path to handle UTF-8 encoding correctly
@@ -281,7 +414,7 @@ async def delete_file(
     sandbox_id: str, 
     path: str,
     request: Request = None,
-    user_id: Optional[str] = Depends(get_optional_user_id)
+    user_id: str = Depends(get_current_user_id_from_jwt)
 ):
     """Delete a file from the sandbox"""
     # Normalize the path to handle UTF-8 encoding correctly
@@ -310,7 +443,7 @@ async def delete_file(
 async def delete_sandbox_route(
     sandbox_id: str,
     request: Request = None,
-    user_id: Optional[str] = Depends(get_optional_user_id)
+    user_id: str = Depends(get_current_user_id_from_jwt)
 ):
     """Delete an entire sandbox"""
     logger.info(f"Received sandbox delete request for sandbox {sandbox_id}, user_id: {user_id}")
@@ -333,7 +466,7 @@ async def delete_sandbox_route(
 async def ensure_project_sandbox_active(
     project_id: str,
     request: Request = None,
-    user_id: Optional[str] = Depends(get_optional_user_id)
+    user_id: str = Depends(get_current_user_id_from_jwt)
 ):
     """
     Ensure that a project's sandbox is active and running.

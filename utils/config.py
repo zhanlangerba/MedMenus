@@ -236,7 +236,28 @@ class Configuration:
     REDIS_PASSWORD: Optional[str] = None
     REDIS_SSL: bool = False
     
-    # Daytona sandbox configuration (optional for simple auth testing)
+    # PPIP/E2B 沙箱配置
+    E2B_API_KEY: Optional[str] = None
+    E2B_DOMAIN: str = "sandbox.ppio.cn"  # PPIO 沙箱域名
+    
+    # 不同用途的沙箱模板配置
+    SANDBOX_TEMPLATES = {
+        'code': 'br263f8awvhrqd7ss1ze',      # code-interpreter-v1: 代码解释器
+        'desktop': '4imxoe43snzcxj95hvha',   # desktop: 桌面环境 (VNC)
+        'browser': '7xvs3snis3tkuq3y8u96',   # browser-chromium: 浏览器环境
+        'base': 'txi15v1zt0q72i1gcyqb'      # base: 基础模板
+    }
+    
+    # 默认模板类型 - 用桌面模板来支持 VNC 和浏览器功能
+    DEFAULT_SANDBOX_TYPE: str = "desktop"
+    SANDBOX_TEMPLATE_ID: Optional[str] = None  # 将在运行时设置
+    
+    def get_sandbox_template(self, sandbox_type: Optional[str] = None) -> str:
+        """获取指定类型的沙箱模板 ID"""
+        template_type = sandbox_type or os.getenv('SANDBOX_TYPE', self.DEFAULT_SANDBOX_TYPE)
+        return self.SANDBOX_TEMPLATES.get(template_type, self.SANDBOX_TEMPLATES['desktop'])
+    
+    # Daytona sandbox configuration (deprecated - 保留以供回退)
     DAYTONA_API_KEY: Optional[str] = None
     DAYTONA_SERVER_URL: Optional[str] = None
     DAYTONA_TARGET: Optional[str] = None
@@ -260,7 +281,11 @@ class Configuration:
     
     # Sandbox configuration
     SANDBOX_IMAGE_NAME = "fufan/manus:0.1"
-    SANDBOX_SNAPSHOT_NAME = "fufan/manus:0.1"
+    
+    # 🔧 PPIP/E2B 沙箱配置已在上面定义，此处移除重复
+    
+    # 保留原配置以供回退
+    SANDBOX_SNAPSHOT_NAME: str = "fufan/manus:0.1"  # Deprecated - Daytona 快照名
     SANDBOX_ENTRYPOINT = "/usr/bin/supervisord -n -c /etc/supervisor/conf.d/supervisord.conf"
 
     # LangFuse configuration

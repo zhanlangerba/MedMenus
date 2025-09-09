@@ -25,6 +25,57 @@ https://www.daytona.io/docs/en/sandbox-management/
 
 
 
+安装 go：https://blog.csdn.net/five_east_west/article/details/134874738
+# 3. 下载依赖
+go mod tidy
+make build OS=linux
+
+
+1. 下载并设置FRPS
+# 下载FRP
+curl -L https://github.com/fatedier/frp/releases/download/v0.60.0/frp_0.60.0_linux_amd64.tar.gz -o /tmp/frp.tar.gz
+cd /tmp && tar -xzf frp.tar.gz
+cd frp_0.60.0_linux_amd64
+
+# 创建FRPS配置文件
+cd /tmp/frp_0.60.0_linux_amd64
+cat > frps.toml << 'EOF'
+bindAddr = "0.0.0.0"
+bindPort = 7000
+vhostHTTPPort = 8080
+vhostHTTPSPort = 8443
+subDomainHost = "localhost"
+
+[webServer]
+addr = "0.0.0.0"
+port = 7500
+user = "admin"
+password = "admin123"
+EOF
+
+./frps -c frps.toml &
+
+export DEFAULT_FRPS_DOMAIN="127.0.0.1" && export DEFAULT_FRPS_PROTOCOL="http" && export DEFAULT_FRPS_PORT="7000" && echo "环境变量已设置: $DEFAULT_FRPS_DOMAIN:$DEFAULT_FRPS_PORT ($DEFAULT_FRPS_PROTOCOL)"
+
+ls -la ~/.config/daytona/server/binaries/v0.0.0-dev/
+
+  cd /c/Users/Administrator/Desktop/daytona-0.49.0
+   export DEFAULT_FRPS_DOMAIN="127.0.0.1"
+   export DEFAULT_FRPS_PROTOCOL="http"
+   export DEFAULT_FRPS_PORT="7000"
+   ~/.config/daytona/server/binaries/v0.0.0-dev/daytona-linux-amd64 serve
+
+
+root@4U:~# ~/.config/daytona/server/binaries/v0.0.0-dev/daytona-linux-amd64 profile add
+Profile muyu added and set as active
+Server URL: http://localhost:3986
+
+
+
+
+
+
+   
 ### ✅ 最新的安装方法（Docker 本地部署）
 
 #### 1. 克隆 Daytona 仓库

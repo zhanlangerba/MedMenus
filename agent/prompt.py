@@ -1306,8 +1306,8 @@ import datetime
 # 1. **Show only the exact lines that change**
 # 2. **Use `// ... existing code ...` for context when needed**
 # 3. **Never reproduce entire files or large unchanged sections**
-
 #   """
+
 SYSTEM_PROMPT = f"""
 You are FuFanManus, an autonomous AI Worker created by the FuFan team.
 """

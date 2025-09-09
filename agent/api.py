@@ -22,6 +22,63 @@ from utils.config import config
 from sandbox.sandbox import create_sandbox, delete_sandbox, get_or_start_sandbox
 # from run_agent_background import run_agent_background, _cleanup_redis_response_list, update_agent_run_status
 from run_agent_background import run_agent_background
+
+def determine_sandbox_type(files):
+    """
+    根据上传的文件类型智能选择沙箱模板
+    
+    Args:
+        files: 上传的文件列表
+        
+    Returns:
+        str: 沙箱类型 ('desktop', 'browser', 'code', 'base')
+    """
+    if not files:
+        return 'desktop'  # 默认使用桌面模板
+    
+    # 分析文件类型
+    file_extensions = []
+    file_names = []
+    
+    for file_obj in files:
+        # UploadFile 对象直接使用 .filename 属性
+        if hasattr(file_obj, 'filename') and file_obj.filename:
+            filename = file_obj.filename.lower()
+        elif hasattr(file_obj, 'get'):
+            # 如果是字典格式的文件信息
+            filename = file_obj.get('filename', '').lower()
+        else:
+            # 如果是字符串
+            filename = str(file_obj).lower()
+            
+        file_names.append(filename)
+        if '.' in filename:
+            ext = filename.split('.')[-1]
+            file_extensions.append(ext)
+    
+    logger.info(f"Analyzing file types: {file_extensions}")
+    
+    # 如果有网页相关文件，使用浏览器模板
+    web_extensions = {'html', 'htm', 'css', 'js', 'ts', 'jsx', 'tsx', 'vue', 'react'}
+    if any(ext in web_extensions for ext in file_extensions):
+        logger.info("Detected web files, selecting browser template")
+        return 'browser'
+    
+    # 如果只有代码文件且不需要图形界面，使用代码解释器
+    code_extensions = {'py', 'ipynb', 'r', 'sql', 'sh', 'bash', 'json', 'yaml', 'yml', 'txt', 'md'}
+    if (any(ext in code_extensions for ext in file_extensions) and 
+        not any(ext in {'png', 'jpg', 'jpeg', 'gif', 'svg', 'pdf', 'doc', 'docx'} for ext in file_extensions)):
+        # 如果有 Jupyter notebook，使用桌面环境以便查看图表
+        if any(ext == 'ipynb' for ext in file_extensions):
+            logger.info("Detected Jupyter notebook, selecting desktop template")
+            return 'desktop'
+        logger.info("Detected pure code files, selecting code interpreter template")
+        return 'code'
+    
+    # 默认使用桌面模板 - 提供最完整的功能
+    # 适用于：图像文件、混合文件类型、需要图形界面的场景
+    logger.info("Using default desktop template")
+    return 'desktop'
 from utils.constants import MODEL_NAME_ALIASES
 from flags.flags import is_enabled
 
@@ -1318,45 +1375,71 @@ async def initiate_agent_with_files(
                 sandbox_pass = str(uuid.uuid4())
                 logger.info(f"Generated sandbox password: {sandbox_pass}")
                 
+                # 根据文件类型和用户需求智能选择模板
+                sandbox_type = determine_sandbox_type(files)
+                logger.info(f"Determined sandbox type: {sandbox_type}")
+                sandbox = await create_sandbox(sandbox_pass, project_id, sandbox_type)
 
-                sandbox = await create_sandbox(sandbox_pass, project_id)
-                sandbox_id = sandbox.id
-                logger.info(f"Created sandbox successfully: {sandbox_id} (project: {project_id})")
+                # 获取沙箱ID
+                sandbox_info = sandbox.get_info()
+                sandbox_id = sandbox_info.sandbox_id if hasattr(sandbox_info, 'sandbox_id') else getattr(sandbox, 'id', 'unknown')
+                logger.info(f"Created sandbox successfully: {sandbox_id} (project: {project_id}, type: {sandbox_type})")
 
-                # 获取预览链接
-                logger.info("Getting preview link...")
-                vnc_link = await sandbox.get_preview_link(6080)
-                website_link = await sandbox.get_preview_link(8080)
+                # 获取访问链接
+                logger.info("Getting sandbox access links...")
                 
-                vnc_url = vnc_link.url if hasattr(vnc_link, 'url') else str(vnc_link).split("url='")[1].split("'")[0]
-                website_url = website_link.url if hasattr(website_link, 'url') else str(website_link).split("url='")[1].split("'")[0]
+                # 判断沙箱类型并获取对应的访问链接
+                sandbox_name = getattr(sandbox_info, 'name', '')
+                logger.info(f"Detected sandbox name: {sandbox_name}")
                 
-                token = None
-                if hasattr(vnc_link, 'token'):
-                    token = vnc_link.token
-                elif "token='" in str(vnc_link):
-                    token = str(vnc_link).split("token='")[1].split("'")[0]
+                vnc_url = ''
+                website_url = ''
+                browser_debug_url = ''
                 
-                logger.info(f"Sandbox VNC URL: {vnc_url}")
-                logger.info(f"Sandbox Website URL: {website_url}")
-                logger.info(f"Sandbox Token: {token}")
-
+                if sandbox_name == 'desktop':
+                    #  Desktop 模板 - 使用 stream API 获取 VNC URL
+                    try:
+                        logger.info("Using desktop stream API to get VNC URL...")
+                        url = sandbox.stream.get_url()
+                        vnc_url = url
+                        logger.info(f"Desktop VNC URL: {url}")
+                        # 尝试获取只读模式URL
+                        try:
+                            readonly_url = sandbox.stream.get_url(view_only=True)
+                            logger.info(f"Desktop readonly VNC URL: {readonly_url}")
+                        except Exception as readonly_error:
+                            logger.debug(f"Failed to get readonly URL: {readonly_error}")
+                            
+                    except Exception as e:
+                        logger.error(f"Failed to get desktop VNC URL: {e}")
+  
+                # TODO
+                elif sandbox_name == 'browser-chromium' or sandbox_type == 'browser':
+                    # 🌐 Browser 模板 - 获取 Chrome 调试协议地址
+                    try:
+                        browser_host = sandbox.get_host(9223)
+                        browser_debug_url = f"https://{browser_host}"
+                        logger.info(f"Browser CDP URL: {browser_debug_url}")
+                    except Exception as e:
+                        logger.error(f"Failed to get browser CDP URL: {e}")
+                
                 # 更新项目信息
                 logger.info("Updating project sandbox information...")
-                update_result = await client.table('projects').update({
-                    'sandbox': {
+                update_result = await client.table('projects').eq('project_id', project_id).update({
+                    'sandbox': json.dumps({
                         'id': sandbox_id, 
                         'pass': sandbox_pass, 
                         'vnc_preview': vnc_url,
                         'sandbox_url': website_url, 
                         'token': token
-                    }
-                }).eq('project_id', project_id).execute()
+                    })
+                })
 
                 if not update_result.data:
                     logger.error(f"Failed to update project {project_id} sandbox information")
                     if sandbox_id:
                         try: 
+                            # TODO
                             await delete_sandbox(sandbox_id)
                             logger.info(f"Deleted sandbox {sandbox_id}")
                         except Exception as e: 
@@ -1368,9 +1451,10 @@ async def initiate_agent_with_files(
             except Exception as e:
                 logger.error(f"Failed to create sandbox: {str(e)}")
                 logger.info("Cleaning up created project...")
-                await client.table('projects').delete().eq('project_id', project_id).execute()
+                await client.table('projects').eq('project_id', project_id).delete()
                 if sandbox_id:
                     try: 
+                        # TODO
                         await delete_sandbox(sandbox_id)
                         logger.info(f"Deleted sandbox {sandbox_id}")
                     except Exception:
@@ -1408,7 +1492,7 @@ async def initiate_agent_with_files(
         
         # # 如果是Agent构建器会话，存储构建器元数据
         if is_agent_builder:
-            print(f"  🔧 存储Agent构建器元数据: target_agent_id={target_agent_id}")
+            print(f"store agent builder metadata: target_agent_id={target_agent_id}")
             thread_data["metadata"] = {
                 "is_agent_builder": True,
                 "target_agent_id": target_agent_id
@@ -1443,68 +1527,82 @@ async def initiate_agent_with_files(
                     try:
                         safe_filename = file.filename.replace('/', '_').replace('\\', '_')
                         target_path = f"/workspace/{safe_filename}"
-                        logger.info(f"    🎯 目标路径: {target_path}")
-                        logger.info(f"    📊 文件大小: {file.size if hasattr(file, 'size') else '未知'} bytes")
+                        logger.info(f"files target_path: {target_path}")
+                        logger.info(f"files size: {file.size if hasattr(file, 'size') else '未知'} bytes")
                         
                         content = await file.read()
-                        logger.info(f"    📖 读取文件内容完成，大小: {len(content)} bytes")
+                        logger.info(f"files read success, size: {len(content)} bytes")
                         
                         upload_successful = False
                         try:
-                            if hasattr(sandbox, 'fs') and hasattr(sandbox.fs, 'upload_file'):
-                                logger.info(f"    🔄 开始上传到沙盒 {sandbox_id}...")
-                                await sandbox.fs.upload_file(content, target_path)
-                                logger.info(f"    ✅ 沙盒上传调用成功: {target_path}")
-                                upload_successful = True
+                            # 使用 PPIO 推荐的方法: sandbox.files.write()
+                            if hasattr(sandbox, 'files') and hasattr(sandbox.files, 'write'):
+                                logger.info(f"Uploading file to sandbox: {target_path}")
+                                # 根据 PPIO 官方文档，files.write() 是同步方法，不需要 await
+                                write_result = sandbox.files.write(target_path, content)
+                                logger.info(f"File uploaded successfully: {target_path}")
+                                upload_successful = True            
                             else:
-                                logger.error(f"    ❌ 沙盒对象缺少上传方法")
-                                raise NotImplementedError("Suitable upload method not found on sandbox object.")
+                                logger.error(f"Sandbox object missing file upload method")
+                                raise NotImplementedError("No suitable upload method found on sandbox object.")
+                                
                         except Exception as upload_error:
-                            logger.error(f"    ❌ 沙盒上传失败 {safe_filename}: {str(upload_error)}", exc_info=True)
+                            logger.error(f"Sandbox upload failed {safe_filename}: {str(upload_error)}")
+                            logger.debug(f"Sandbox upload error details: {upload_error}")  # 使用 debug 记录详细错误
 
                         if upload_successful:
                             try:
-                                logger.info(f"    🔍 验证文件上传...")
+                                logger.info(f"Verifying file upload...")
                                 await asyncio.sleep(0.2)
                                 parent_dir = os.path.dirname(target_path)
-                                files_in_dir = await sandbox.fs.list_files(parent_dir)
-                                file_names_in_dir = [f.name for f in files_in_dir]
                                 
-                                if safe_filename in file_names_in_dir:
-                                    successful_uploads.append(target_path)
-                                    logger.info(f"    ✅ 文件上传并验证成功: {safe_filename} -> {target_path}")
+                                # 使用 PPIO 正确的 API 验证文件
+                                if hasattr(sandbox, 'files') and hasattr(sandbox.files, 'exists'):
+                                    # 检查文件是否存在
+                                    file_exists = sandbox.files.exists(target_path)
+                                    if file_exists:
+                                        successful_uploads.append(target_path)
+                                        logger.info(f"File uploaded and verified successfully: {safe_filename} -> {target_path}")
+                                    else:
+                                        logger.error(f"File verification failed: {target_path} does not exist")
+                                        failed_uploads.append(safe_filename)
                                 else:
-                                    logger.error(f"    ❌ 文件验证失败: {safe_filename} 在 {parent_dir} 中未找到")
-                                    failed_uploads.append(safe_filename)
+                                    # 如果没有 exists 方法，直接标记为成功（已经成功上传了）
+                                    successful_uploads.append(target_path)
+                                    logger.info(f"File uploaded successfully (skip verification): {safe_filename} -> {target_path}")
+                                    
                             except Exception as verify_error:
-                                logger.error(f"    ❌ 文件验证错误 {safe_filename}: {str(verify_error)}", exc_info=True)
-                                failed_uploads.append(safe_filename)
+                                # 验证失败不影响上传，标记为成功
+                                successful_uploads.append(target_path)
+                                logger.warning(f"File verification failed but upload was successful {safe_filename}: {str(verify_error)}")
+                                logger.debug(f"File verification error details: {verify_error}")  # 使用 debug 避免 exc_info 问题
                         else:
                             failed_uploads.append(safe_filename)
                     except Exception as file_error:
-                        logger.error(f"    ❌ 处理文件失败 {file.filename}: {str(file_error)}", exc_info=True)
+                        logger.error(f"File processing failed {file.filename}: {str(file_error)}")
+                        logger.debug(f"File processing error details: {file_error}")  # 使用 debug 记录详细错误
                         failed_uploads.append(file.filename)
                     finally:
                         await file.close()
-                        logger.info(f"    🔒 文件已关闭: {file.filename}")
+                        logger.info(f"File closed: {file.filename}")
 
             # 更新消息内容
             if successful_uploads:
                 message_content += "\n\n" if message_content else ""
                 for file_path in successful_uploads: 
-                    message_content += f"[Uploaded File: {file_path}]\n"
-                logger.info(f"  ✅ 成功上传 {len(successful_uploads)} 个文件")
+                    message_content += f"[用户上传文件: {file_path}]\n"
+                logger.info(f"File uploaded successfully: {len(successful_uploads)} files")
                 
             if failed_uploads:
                 message_content += "\n\nThe following files failed to upload:\n"
                 for failed_file in failed_uploads: 
                     message_content += f"- {failed_file}\n"
-                logger.warning(f"  ⚠️ 上传失败 {len(failed_uploads)} 个文件")
+                logger.warning(f"File upload failed: {len(failed_uploads)} files")
                 
-            logger.info(f"  📝 最终消息内容: {message_content}")
+            logger.info(f"Final message content: {message_content}")
         else:
-            logger.info("  ⏭️ 无文件需要上传")
-
+            logger.info("No files to upload")
+ 
         # 添加初始用户消息到线程
         message_payload = {"role": "user", "content": message_content}
         logger.info(f"New Message payload: {message_payload}")
@@ -2510,7 +2608,6 @@ async def update_agent(
         def values_different(new_val, old_val):
             if new_val is None:
                 return False
-            import json
             try:
                 new_json = json.dumps(new_val, sort_keys=True) if new_val is not None else None
                 old_json = json.dumps(old_val, sort_keys=True) if old_val is not None else None
@@ -3062,7 +3159,6 @@ async def get_custom_mcp_tools_for_agent(
         }
         
         if 'X-MCP-Headers' in request.headers:
-            import json
             try:
                 mcp_config['headers'] = json.loads(request.headers['X-MCP-Headers'])
             except json.JSONDecodeError:

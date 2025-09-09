@@ -1,0 +1,32 @@
+# 🔧 PPIO 沙箱服务配置
+# 根据 https://ppio.com/docs/sandbox/get-start 的要求
+
+# 1. E2B API 密钥 (必需)
+# 在 PPIO 控制台创建: https://ppio.com/user/register
+E2B_API_KEY=sk_xxx_your_ppio_api_key_here
+
+# 2. E2B 域名 (必需 - 指向 PPIO 服务)
+E2B_DOMAIN=sandbox.ppio.cn
+
+# 3. 可选：沙箱模板 ID
+SANDBOX_TEMPLATE_ID=base
+
+# ========================================
+# 其他现有配置保持不变
+# ========================================
+
+# 数据库配置
+DATABASE_URL=your_database_url
+
+# Redis 配置  
+REDIS_URL=your_redis_url
+
+# 其他 API 密钥
+OPENAI_API_KEY=your_openai_key
+TAVILY_API_KEY=your_tavily_key
+FIRECRAWL_API_KEY=your_firecrawl_key
+
+# 旧的 Daytona 配置 (保留以供回退)
+# DAYTONA_API_KEY=your_daytona_key
+# DAYTONA_SERVER_URL=https://your-daytona-server.com
+# DAYTONA_TARGET=us 

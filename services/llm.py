@@ -438,7 +438,7 @@ async def make_adk_api_call(
     model_name: str = "openai/gpt-4o",
     temperature: float = 0,
     max_tokens: Optional[int] = None,
-    tools: Optional[List[Dict[str, Any]]] = None,
+    tools: Optional[Union[List[Dict[str, Any]], Dict[str, callable], List]] = None,  # 🔄 支持ADK工具列表
     tool_choice: str = "auto",
     stream: bool = True,
     enable_thinking: Optional[bool] = False,
@@ -455,7 +455,7 @@ async def make_adk_api_call(
         model_name: Name of the model to use
         temperature: Sampling temperature (0-1)
         max_tokens: Maximum tokens in the response
-        tools: List of tool definitions for function calling
+        tools: List of tool schemas OR dict of tool functions (ADK mode)
         tool_choice: How to select tools ("auto" or "none")
         stream: Whether to stream the response
         enable_thinking: Whether to enable thinking
@@ -603,17 +603,47 @@ async def make_adk_api_call(
         
         # 必须返回 None 让ADK继续正常执行
         return None
+
+    # 🔧 处理工具：将函数字典转换为ADK FunctionTool列表
+    adk_tools = []
+    if tools:
+        from google.adk.tools import FunctionTool # type: ignore
+        
+        if isinstance(tools, dict):
+            # 工具是函数字典，转换为FunctionTool列表
+            logger.info(f"🔧 转换 {len(tools)} 个工具函数为 FunctionTool")
+            
+            for tool_name, tool_func in tools.items():
+                try:
+                    function_tool = FunctionTool(func=tool_func)
+                    adk_tools.append(function_tool)
+                    logger.info(f"✅ 转换工具: {tool_name}")
+                except Exception as e:
+                    logger.error(f"❌ 转换工具失败 {tool_name}: {e}")
+                    
+        elif isinstance(tools, list):
+            # 如果已经是FunctionTool列表，直接使用
+            adk_tools = tools
+            logger.info(f"🎯 直接使用ADK工具列表: {len(adk_tools)} 个工具")
+        
+        else:
+            logger.error(f"❌ 不支持的tools类型: {type(tools)}")
     
-    # 创建 Agent 对象（带回调）
+    logger.info(f"ADK - 最终工具列表: {len(adk_tools)} 个工具")
+    
+    logger.info(f"run to adk_tools: {adk_tools}")
+    # 创建 Agent 对象（带回调和工具）
     agent = LlmAgent(
         name=app_name,
         model=model,
         instruction=agent_instruction,
-        before_model_callback=before_model_callback  # 🔗 使用 before_model_callback
+        tools=adk_tools,  # 🔧 传递转换后的ADK工具列表
+        before_model_callback=before_model_callback  # 使用 before_model_callback
     )
 
     logger.info(f"Agent created successfully: {agent}")
 
+    logger.info(f"agent_info：{agent}")
 
     # 设置数据库会话服务
     try:

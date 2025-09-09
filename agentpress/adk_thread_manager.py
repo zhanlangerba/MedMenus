@@ -80,62 +80,6 @@ class ADKThreadManager:
         # self.runner: Optional[Runner] = None
         # self.session_service: Optional[DatabaseSessionService] = None
 
-    async def setup(self, thread_id: str, project_id: str, model_name: str, prompt: str, user_id: str):
-        """设置 ADK 组件
-
-        Args:
-            thread_id: 线程ID
-            project_id: 项目ID
-            model_name: 模型名称
-            prompt: 系统提示词
-            user_id: 用户ID
-        """
-        logger.info(f"Setting up ADK ThreadManager for thread {thread_id}")
-        
-        try:
-            # 1. 创建 LlmAgent
-            logger.debug("Creating LlmAgent...")
-            self.llm_agent = LlmAgent(
-                name="fufanmanus_basic_agent",
-                model=Gemini(model=model_name),
-                instruction=prompt,
-                description="Suna.so AI Assistant powered by Google ADK",
-                tools=self.tools
-            )
-            logger.info("LlmAgent created successfully")
-            
-            # 2. 创建 DatabaseSessionService
-            logger.debug("Creating DatabaseSessionService...")
-            db_url = getattr(config, 'DATABASE_URL', "postgresql://postgres:password@localhost:5432/fufanmanus")
-            self.session_service = DatabaseSessionService(db_url)
-            logger.info("DatabaseSessionService created successfully")
-            
-            # 3. 创建 Runner
-            logger.debug("Creating Runner...")
-            self.runner = Runner(
-                app_name="suna",
-                agent=self.llm_agent,
-                session_service=self.session_service,
-            )
-            logger.info("Runner created successfully")
-            
-            # 4. 创建或获取会话
-            logger.debug("Creating session...")
-            self.session = await self.session_service.create_session(
-                app_name="suna",
-                user_id=user_id,
-                state={
-                    "thread_id": thread_id,
-                    "project_id": project_id,
-                    "agent_config": self.agent_config
-                }
-            )
-            logger.info(f"Session created successfully: {self.session.id}")
-            
-        except Exception as e:
-            logger.error(f"Failed to setup ADK ThreadManager: {e}")
-            raise
-
     def add_tool(self, tool_class: Type[Tool], function_names: Optional[List[str]] = None, **kwargs):
         """Add a tool to the ThreadManager."""
         self.tool_registry.register_tool(tool_class, function_names, **kwargs)
@@ -282,6 +226,7 @@ class ADKThreadManager:
         processor_config: Optional[ProcessorConfig] = None,
         tool_choice: ToolChoice = "auto",
         native_max_auto_continues: int = 0,
+        available_functions: Optional[Dict[str, callable]] = None,
         max_xml_tool_calls: int = 0,
         include_xml_examples: bool = False,
         enable_thinking: Optional[bool] = False,
@@ -458,14 +403,7 @@ class ADKThreadManager:
                     }
                     prepared_messages.append(temporary_assistant_message)
                     logger.info(f"Added temporary assistant message with {len(partial_content)} chars for auto-continue context")
-
-                # 4. 准备LLM调用的工具
-                openapi_tool_schemas = None
-                if config.native_tool_calling:
-                    openapi_tool_schemas = self.tool_registry.get_openapi_schemas()
-                    logger.debug(f"Retrieved {len(openapi_tool_schemas) if openapi_tool_schemas else 0} OpenAPI tool schemas")
-
-            
+     
                 prepared_messages = self.context_manager.compress_messages(prepared_messages, llm_model)
 
                 # 5. 准备大模型调用
@@ -487,14 +425,18 @@ class ADKThreadManager:
                     #     )
 
                     from services.llm import make_adk_api_call
-                    logger.info(f"prepared_messages: {prepared_messages}")
+                    
+                    tool_functions = available_functions
+                    logger.info(f"📋 ADK工具函数列表: {list(tool_functions.keys()) if tool_functions else []}")
+
+                    logger.info(f"Before make_adk_api_call, tool_functions: {tool_functions}")
                     # 将构建好的提示词实际发送到大模型中                    
                     llm_response = await make_adk_api_call(
                         prepared_messages, 
                         llm_model,
                         temperature=llm_temperature,
                         max_tokens=llm_max_tokens,
-                        tools=openapi_tool_schemas,
+                        tools=tool_functions,  # 🔧 传递工具函数字典
                         tool_choice=tool_choice if config.native_tool_calling else "none",
                         stream=stream,
                         enable_thinking=enable_thinking,

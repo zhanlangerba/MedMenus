@@ -33,29 +33,34 @@ class ToolRegistry:
             **kwargs: Additional arguments passed to tool initialization
             
         Notes:
-            - If function_names is None, all functions are registered
-            - Handles OpenAPI schema registration
+            - For ADK: Only stores tool instance, ADK handles schemas automatically
+            - For legacy: If function_names is None, all functions are registered
         """
         logger.debug(f"Registering tool class: {tool_class.__name__}")
         tool_instance = tool_class(**kwargs)
-        schemas = tool_instance.get_schemas()
         
-        logger.debug(f"Available schemas for {tool_class.__name__}: {list(schemas.keys())}")
+        #只存储工具实例，不处理复杂的schema
+        # ADK会自动从函数签名和docstring推断schema
+        # 检查工具实例的方法
+        for method_name in dir(tool_instance):
+            method = getattr(tool_instance, method_name)
+            
+            # 只处理公共的可调用方法（排除私有方法和属性）
+            if (not method_name.startswith('_') and 
+                callable(method) and 
+                hasattr(method, '__self__') and  # 确保是绑定方法
+                method_name not in ['get_schemas', 'success_response', 'fail_response']):  # 排除基类方法
+                
+                if function_names is None or method_name in function_names:
+                    # 🎯 简化存储：只保存工具实例，让ADK处理其余部分
+                    self.tools[method_name] = {
+                        "instance": tool_instance,
+                        "method": method,  # 直接存储可调用的方法
+                        "tool_class": tool_class.__name__
+                    }
+                    logger.debug(f"Registered method '{method_name}' from {tool_class.__name__}")
         
-        registered_openapi = 0
-        
-        for func_name, schema_list in schemas.items():
-            if function_names is None or func_name in function_names:
-                for schema in schema_list:
-                    if schema.schema_type == SchemaType.OPENAPI:
-                        self.tools[func_name] = {
-                            "instance": tool_instance,
-                            "schema": schema
-                        }
-                        registered_openapi += 1
-                        logger.debug(f"Registered OpenAPI function {func_name} from {tool_class.__name__}")
-        
-        logger.debug(f"Tool registration complete for {tool_class.__name__}: {registered_openapi} OpenAPI functions")
+        logger.debug(f"Tool registration complete for {tool_class.__name__}: {len([k for k in self.tools.keys() if self.tools[k]['tool_class'] == tool_class.__name__])} methods")
 
     def get_available_functions(self) -> Dict[str, Callable]:
         """Get all available tool functions.
@@ -65,12 +70,9 @@ class ToolRegistry:
         """
         available_functions = {}
         
-        # Get OpenAPI tool functions
-        for tool_name, tool_info in self.tools.items():
-            tool_instance = tool_info['instance']
-            function_name = tool_name
-            function = getattr(tool_instance, function_name)
-            available_functions[function_name] = function
+        # 🔄 简化版本：直接从存储的方法获取可调用函数
+        for method_name, tool_info in self.tools.items():
+            available_functions[method_name] = tool_info['method']
             
         logger.debug(f"Retrieved {len(available_functions)} available functions")
         return available_functions
@@ -82,7 +84,7 @@ class ToolRegistry:
             tool_name: Name of the tool function
             
         Returns:
-            Dict containing tool instance and schema, or empty dict if not found
+            Dict containing tool instance and method, or empty dict if not found
         """
         tool = self.tools.get(tool_name, {})
         if not tool:
@@ -94,14 +96,11 @@ class ToolRegistry:
         
         Returns:
             List of OpenAPI-compatible schema definitions
+            Note: For ADK, returns empty list as ADK handles schemas automatically
         """
-        schemas = [
-            tool_info['schema'].schema 
-            for tool_info in self.tools.values()
-            if tool_info['schema'].schema_type == SchemaType.OPENAPI
-        ]
-        logger.debug(f"Retrieved {len(schemas)} OpenAPI schemas")
-        return schemas
+        # 🔄 ADK模式：返回空列表，因为ADK会自动从函数签名推断schema
+        logger.debug("ADK mode: OpenAPI schemas handled automatically by ADK framework")
+        return []
 
     def get_usage_examples(self) -> Dict[str, str]:
         """Get usage examples for tools.
@@ -126,4 +125,25 @@ class ToolRegistry:
         
         logger.debug(f"Retrieved {len(examples)} usage examples")
         return examples
+
+    def get_tool_methods(self) -> Dict[str, Callable]:
+        """Get all tool methods for ADK (直接获取可调用方法)
+        
+        Returns:
+            Dict mapping method names to callable methods
+        """
+        return {name: info['method'] for name, info in self.tools.items()}
+    
+    def get_tool_instances(self) -> Dict[str, Any]:
+        """Get all tool instances for ADK
+        
+        Returns:
+            Dict mapping tool class names to tool instances
+        """
+        instances = {}
+        for name, info in self.tools.items():
+            tool_class = info['tool_class']
+            if tool_class not in instances:
+                instances[tool_class] = info['instance']
+        return instances
 

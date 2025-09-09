@@ -29,7 +29,7 @@ from collections import OrderedDict
 # from pydantic import BaseModel
 from flags import api as feature_flags_api
 from agent import api as agent_api
-# from sandbox import api as sandbox_api
+from sandbox import api as sandbox_api
 # from services import billing as billing_api
 # 
 # from services import transcription as transcription_api
@@ -75,7 +75,7 @@ async def lifespan(app: FastAPI):
         # Start background tasks
         # asyncio.create_task(agent_api.restore_running_agent_runs())
 
-        # sandbox_api.initialize(db)
+        sandbox_api.initialize(db)
         
         
         # triggers_api.initialize(db)
@@ -171,7 +171,7 @@ api_router.include_router(agent_api.router)
 # Include agent versioning router
 from agent.versioning.api import router as versioning_router
 api_router.include_router(versioning_router)  
-# api_router.include_router(sandbox_api.router)
+api_router.include_router(sandbox_api.router)
 # api_router.include_router(billing_api.router)
 
 # api_router.include_router(api_keys_api.router)

@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional, AsyncGenerator, Tuple, Union, Callable, Literal
 from dataclasses import dataclass
 from utils.logger import logger
+from utils.json_helpers import to_json_string
 from agentpress.tool import ToolResult
 from agentpress.tool_registry import ToolRegistry
 from agentpress.xml_tool_parser import XMLToolParser
@@ -185,6 +186,9 @@ class ResponseProcessor:
         # 运行状态初始化 
         continuous_state = continuous_state or {}   # 保存跨轮次的状态信息
         accumulated_content = continuous_state.get('accumulated_content', "") # 累积的内容，在下一轮中作为上下文
+        # 🔧 确保 accumulated_content 始终是字符串
+        if not isinstance(accumulated_content, str):
+            accumulated_content = str(accumulated_content)
         tool_calls_buffer = {} # 工具调用缓冲区
         current_xml_content = accumulated_content   # 累积内容如果自动继续，否则为空
         xml_chunks_buffer = [] # 累积 XML 内容
@@ -199,6 +203,13 @@ class ResponseProcessor:
         has_printed_thinking_prefix = False # 标记是否打印思考前缀
         agent_should_terminate = False # 标记是否执行终止工具
         complete_native_tool_calls = [] # 初始化早期用于 assistant_response_end
+        
+        # 🔧 工具调用ID到assistant_message_id的映射（跨事件持久化）
+        tool_call_to_assistant_map = {}
+        # 🔧 工具调用ID到参数的映射，用于工具响应时获取原始参数
+        tool_call_to_params_map = {}
+        # 🔧 初始化工具调用ID到索引的映射
+        self.tool_call_to_index_map = {}
         
         # 不作为流控制，仅用于最后记录
         finish_reason = None           
@@ -224,6 +235,7 @@ class ResponseProcessor:
         continuous_state['thread_run_id'] = thread_run_id
         
         logger.info(f"Processing ADK streaming response with thread_run_id: {thread_run_id}")
+
 
         try:
             # 当前已执行的自动继续次数
@@ -325,6 +337,9 @@ class ResponseProcessor:
                 # ADK 的动作（移交、升级、状态/工件 delta、鉴权请求等）
                 actions = getattr(event, "actions", None)
                 long_run_tools = list(getattr(event, "long_running_tool_ids", []) or [])
+                
+                # 🔧 提前获取 content，供状态判断使用
+                content = getattr(event, "content", None)
 
                 # 为每个 chunk 计算“所处状态”
                 def _derive_chunk_status() -> str:
@@ -335,6 +350,17 @@ class ResponseProcessor:
                     # 移交/升级具备优先级标记
                     if actions and (getattr(actions, "transfer_to_agent", None) or getattr(actions, "escalate", None)):
                         return "handover"
+                    
+                    # 🔧 ADK专用：检测工具调用和工具响应
+                    if content and hasattr(content, 'parts'):
+                        for p in getattr(content, 'parts', []):
+                            # 检测工具调用
+                            if hasattr(p, 'function_call') and getattr(p, 'function_call', None):
+                                return "tool_call"
+                            # 检测工具响应
+                            if hasattr(p, 'function_response') and getattr(p, 'function_response', None):
+                                return "tool_response"
+                    
                     if is_final:
                         return "final"
                     if partial is True:
@@ -344,25 +370,29 @@ class ResponseProcessor:
                         return "possibly_final"
                     return "unknown"
 
-                # 用 _derive_chunk_status 来确定 finish_reason
-                finish_reason = _derive_chunk_status()
-                logger.info(f"current chunk status: {finish_reason}")
+                # 计算当前状态并记录
+                chunk_status = _derive_chunk_status()
+                logger.info(f"current chunk status: {chunk_status}")
+                
+                # 🔧 只有特定状态才设置为 finish_reason（工具调用和响应不是结束状态）
+                if chunk_status in ["error", "final", "possibly_final"]:
+                    finish_reason = chunk_status
 
                 # 过滤ADK的最终完整chunk，避免重复
                 if (partial is False and 
-                    getattr(event, "content", None) and 
-                    getattr(event.content, "parts", None) and
-                    finish_reason == "final"):
+                    content and 
+                    getattr(content, "parts", None) and
+                    chunk_status == "final"):
                     # 这是ADK的最终完整消息，跳过处理，避免重复
                     logger.info(f"Skipping final complete ADK chunk to avoid duplication")
                     continue
 
                 # 在 ADK 事件中提取文本块： Content.parts[*].text
-                content = getattr(event, "content", None)
                 chunk_text = ""  # 初始化 chunk_text
                 
-                if getattr(event, "content", None):
-                    parts = getattr(event.content, "parts", None)
+                if content:
+                    logger.info(f"event.content: {content}")
+                    parts = getattr(content, "parts", None)
 
                     # TODO ： 如果是思考模型，需要处理思考模型的 reasoning_content
                     # Check for and log Anthropic thinking content
@@ -380,48 +410,284 @@ class ResponseProcessor:
                     #     accumulated_content += reasoning_content
 
                     if parts:
-                        # 确保我们只取字符串文本
+                        # 处理文本和工具调用
                         texts: List[str] = []
+                        tool_calls: List[dict] = []
+                        tool_responses: List[dict] = []
+                        
                         for p in parts:
+                            # 处理文本内容
                             t = getattr(p, "text", None)
-                            if t is None:
-                                # 容错：Part 也可能是其他类型（如工具/引用），这里仅处理文本
-                                continue
-                            # 强制保证是 str
-                            if not isinstance(t, str):
-                                t = str(t)
-                            texts.append(t)
+                            if t is not None:
+                                if not isinstance(t, str):
+                                    t = str(t)
+                                texts.append(t)
+                            
+                            # 处理工具调用
+                            function_call = getattr(p, "function_call", None)
+                            if function_call is not None:
+                                tool_call = {
+                                    "id": getattr(function_call, "id", None),
+                                    "name": getattr(function_call, "name", None),
+                                    "args": getattr(function_call, "args", {})
+                                }
+                                tool_calls.append(tool_call)
+                                logger.info(f"🔧 检测到工具调用: {tool_call['name']}({tool_call['args']})")
+                            
+                            # 处理工具响应
+                            function_response = getattr(p, "function_response", None)
+                            if function_response is not None:
+                                tool_response = {
+                                    "id": getattr(function_response, "id", None),
+                                    "name": getattr(function_response, "name", None),
+                                    "response": getattr(function_response, "response", {})
+                                }
+                                tool_responses.append(tool_response)
+                                logger.info(f"✅ 检测到工具响应: {tool_response['name']} -> {tool_response['response']}")
+                        
+                        # 处理文本内容
                         if texts:
-                            chunk_text = "".join(texts)
+                            # 🔧 确保所有元素都是字符串，避免拼接错误
+                            chunk_text = "".join(str(t) for t in texts)
+                        
+                        # Yield 工具调用事件 - 前端期望的 Assistant 消息格式
+                        for tool_index, tool_call in enumerate(tool_calls):
+                            now_iso = datetime.now(timezone.utc).isoformat()
+                            assistant_message_id = str(uuid.uuid4())
+                            
+                            # 🔧 首先发送工具开始状态消息（前端工具调用显示的关键）
+                            tool_started_content = {
+                                "status_type": "tool_started",
+                                "function_name": tool_call["name"],
+                                "arguments": to_json_string(tool_call["args"]),
+                                "tool_index": tool_index
+                            }
+                            
+                            tool_started_metadata = {
+                                "stream_status": "tool_started",
+                                "thread_run_id": thread_run_id,
+                                "tool_name": tool_call["name"],
+                                "tool_index": tool_index
+                            }
+                            
+                            # 🔧 保存工具开始状态消息到数据库
+                            saved_tool_started_msg = await self._add_message_with_agent_info(
+                                thread_id=thread_id,
+                                type="status",
+                                content=tool_started_content,
+                                is_llm_message=False,
+                                metadata=tool_started_metadata
+                            )
+                            
+                            # Yield工具开始状态消息
+                            if saved_tool_started_msg:
+                                yield format_for_yield(saved_tool_started_msg)
+                            else:
+                                yield {
+                                    "sequence": __sequence,
+                                    "message_id": f"tool_started_{uuid.uuid4().hex[:8]}",
+                                    "thread_id": thread_id,
+                                    "type": "status",
+                                    "is_llm_message": False,
+                                    "content": to_json_string(tool_started_content),
+                                    "metadata": to_json_string(tool_started_metadata),
+                                    "created_at": now_iso,
+                                    "updated_at": now_iso
+                                }
+                            __sequence += 1
+                            
+                            # 🔧 构建XML格式的工具调用内容（前端左侧按钮需要）
+                            xml_params = []
+                            for param_name, param_value in tool_call["args"].items():
+                                # 确保参数值被正确转义和格式化
+                                if isinstance(param_value, str):
+                                    escaped_value = param_value.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+                                else:
+                                    escaped_value = str(param_value)
+                                xml_params.append(f"<parameter name=\"{param_name}\">{escaped_value}</parameter>")
+                            
+                            xml_tool_call = f"""<function_calls>
+<invoke name="{tool_call["name"]}">
+{chr(10).join(xml_params)}
+</invoke>
+</function_calls>"""
+                            
+                            # 🔧 构建工具调用消息内容（同时包含XML和OpenAI格式）
+                            tool_call_content = {
+                                "role": "assistant",
+                                "content": xml_tool_call,  # XML格式给左侧按钮
+                                "tool_calls": [{
+                                    "id": tool_call["id"],
+                                    "type": "function",
+                                    "function": {
+                                        "name": tool_call["name"],
+                                        "arguments": to_json_string(tool_call["args"])
+                                    }
+                                }]  # OpenAI格式给右侧面板
+                            }
+                            
+                            tool_call_metadata = {
+                                "stream_status": "tool_call", 
+                                "thread_run_id": thread_run_id,
+                                "tool_name": tool_call["name"]
+                            }
+                            
+                            # 🔧 保存到数据库
+                            saved_tool_call_msg = await self._add_message_with_agent_info(
+                                thread_id=thread_id,
+                                type="assistant", 
+                                content=tool_call_content,
+                                is_llm_message=True,
+                                metadata=tool_call_metadata
+                            )
+                            
+                            # 🔧 建立工具调用ID到assistant_message_id的映射
+                            if saved_tool_call_msg:
+                                actual_message_id = saved_tool_call_msg.get('message_id', assistant_message_id)
+                                tool_call_to_assistant_map[tool_call["id"]] = str(actual_message_id)
+                            else:
+                                tool_call_to_assistant_map[tool_call["id"]] = assistant_message_id
+                            
+                            # 🔧 存储工具调用参数，供工具响应时使用
+                            tool_call_to_params_map[tool_call["id"]] = tool_call["args"]
+                            # 🔧 存储工具调用ID到索引的映射，供工具完成状态使用
+                            tool_call_to_index_map = getattr(self, 'tool_call_to_index_map', {})
+                            tool_call_to_index_map[tool_call["id"]] = tool_index
+                            self.tool_call_to_index_map = tool_call_to_index_map
+                            
+                            # Yield消息（如果保存成功则使用保存的消息，否则构造临时消息）
+                            if saved_tool_call_msg:
+                                yield format_for_yield(saved_tool_call_msg)
+                            else:
+                                yield {
+                                    "sequence": __sequence,
+                                    "message_id": assistant_message_id,
+                                    "thread_id": thread_id,
+                                    "type": "assistant",
+                                    "is_llm_message": True,
+                                    "content": to_json_string(tool_call_content),
+                                    "metadata": to_json_string(tool_call_metadata),
+                                    "created_at": now_iso,
+                                    "updated_at": now_iso
+                                }
+                            __sequence += 1
+                        
+                        # Yield 工具响应事件 - 前端期望的 Tool 消息格式，带关联ID
+                        for tool_response in tool_responses:
+                            now_iso = datetime.now(timezone.utc).isoformat()
+                            assistant_message_id = tool_call_to_assistant_map.get(tool_response["id"])
+                            
+                            # 🔧 构建工具响应消息内容
+                            # 从映射中获取工具调用的原始参数
+                            tool_parameters = tool_call_to_params_map.get(tool_response["id"], {})
+                            
+                            tool_response_content = {
+                                "tool_name": tool_response["name"],
+                                "parameters": tool_parameters,
+                                "result": tool_response["response"]
+                            }
+                            
+                            tool_response_metadata = {
+                                "stream_status": "tool_response",
+                                "thread_run_id": thread_run_id,
+                                "tool_name": tool_response["name"],
+                                "tool_call_id": tool_response["id"],
+                                "assistant_message_id": assistant_message_id
+                            }
+                            
+                            # 🔧 保存到数据库
+                            saved_tool_response_msg = await self._add_message_with_agent_info(
+                                thread_id=thread_id,
+                                type="tool",
+                                content=tool_response_content, 
+                                is_llm_message=False,
+                                metadata=tool_response_metadata
+                            )
+                            
+                            # Yield消息（如果保存成功则使用保存的消息，否则构造临时消息）
+                            if saved_tool_response_msg:
+                                yield format_for_yield(saved_tool_response_msg)
+                            else:
+                                yield {
+                                    "sequence": __sequence,
+                                    "message_id": str(uuid.uuid4()),
+                                    "thread_id": thread_id,
+                                    "type": "tool",
+                                    "is_llm_message": False,
+                                    "content": to_json_string(tool_response_content),
+                                    "metadata": to_json_string(tool_response_metadata),
+                                    "created_at": now_iso,
+                                    "updated_at": now_iso
+                                }
+                            __sequence += 1
+                            
+                            # 🔧 发送工具完成状态消息（前端工具调用结束显示的关键）
+                            tool_call_to_index_map = getattr(self, 'tool_call_to_index_map', {})
+                            tool_index = tool_call_to_index_map.get(tool_response["id"], 0)
+                            
+                            tool_completed_content = {
+                                "status_type": "tool_completed",
+                                "tool_index": tool_index
+                            }
+                            
+                            tool_completed_metadata = {
+                                "stream_status": "tool_completed",
+                                "thread_run_id": thread_run_id,
+                                "tool_name": tool_response["name"],
+                                "tool_index": tool_index
+                            }
+                            
+                            # 🔧 保存工具完成状态消息到数据库
+                            saved_tool_completed_msg = await self._add_message_with_agent_info(
+                                thread_id=thread_id,
+                                type="status",
+                                content=tool_completed_content,
+                                is_llm_message=False,
+                                metadata=tool_completed_metadata
+                            )
+                            
+                            # Yield工具完成状态消息
+                            if saved_tool_completed_msg:
+                                yield format_for_yield(saved_tool_completed_msg)
+                            else:
+                                yield {
+                                    "sequence": __sequence,
+                                    "message_id": f"tool_completed_{uuid.uuid4().hex[:8]}",
+                                    "thread_id": thread_id,
+                                    "type": "status",
+                                    "is_llm_message": False,
+                                    "content": to_json_string(tool_completed_content),
+                                    "metadata": to_json_string(tool_completed_metadata),
+                                    "created_at": now_iso,
+                                    "updated_at": now_iso
+                                }
+                            __sequence += 1
 
                     if chunk_text:
                         # 追加到累积内容中
+                        # 🔧 确保拼接操作安全
+                        if not isinstance(accumulated_content, str):
+                            accumulated_content = str(accumulated_content)
+                        if not isinstance(chunk_text, str):
+                            chunk_text = str(chunk_text)
                         accumulated_content += chunk_text
                         current_xml_content += chunk_text
 
-                    # TODO： 这里需要处理工具调用
-                    # # Respect XML tool-call limit for yielding chunks (same semantics)
-                    # if not (config.max_xml_tool_calls > 0 and xml_tool_call_count >= config.max_xml_tool_calls):
-                    #     now_chunk_iso = datetime.now(timezone.utc).isoformat()
-                    #     yield {
-                    #         "sequence": __sequence,
-                    #         "message_id": None,
-                    #         "thread_id": thread_id,
-                    #         "type": "assistant",
-                    #         "is_llm_message": True,
-                    #         "content": to_json_string({"role": "assistant", "content": chunk_text}),
-                    #         "metadata": to_json_string({"stream_status": "chunk", "thread_run_id": thread_run_id}),
-                    #         "created_at": now_chunk_iso,
-                    #         "updated_at": now_chunk_iso
-                    #     }
-                    #     __sequence += 1
-                    # else:
-                    #     logger.info("XML tool call limit reached - not yielding more content chunks")
-                    #     self.trace.event(
-                    #         name="xml_tool_call_limit_reached",
-                    #         level="DEFAULT",
-                    #         status_message="XML tool call limit reached - not yielding more content chunks"
-                    #     )
+                        # 🔧 Yield 流式文本内容（只在非工具调用状态下）
+                        if chunk_status == "delta":
+                            now_chunk_iso = datetime.now(timezone.utc).isoformat()
+                            yield {
+                                "sequence": __sequence,
+                                "message_id": None,
+                                "thread_id": thread_id,
+                                "type": "assistant",
+                                "is_llm_message": True,
+                                "content": to_json_string({"role": "assistant", "content": chunk_text}),
+                                "metadata": to_json_string({"stream_status": "chunk", "thread_run_id": thread_run_id}),
+                                "created_at": now_chunk_iso,
+                                "updated_at": now_chunk_iso
+                            }
+                            __sequence += 1
 
                     # # ---- XML tool-calls in-stream (same as original) ----
                     # if config.xml_tool_calling and not (config.max_xml_tool_calls > 0 and xml_tool_call_count >= config.max_xml_tool_calls):

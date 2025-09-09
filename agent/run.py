@@ -75,89 +75,93 @@ class ToolManager:
         self.thread_id = thread_id
     
     def register_all_tools(self):
-        self.thread_manager.add_tool(ExpandMessageTool, thread_id=self.thread_id, thread_manager=self.thread_manager)
-        self.thread_manager.add_tool(MessageTool)
+        # 🧪 测试现有工具注册流程
+        from agent.tools.simple_test_tool import SimpleTestTool
+        self.thread_manager.add_tool(SimpleTestTool)
+        logger.info("✅ Registered test tool: SimpleTestTool")
         
-        self.thread_manager.add_tool(SandboxShellTool, project_id=self.project_id, thread_manager=self.thread_manager)
-        self.thread_manager.add_tool(SandboxFilesTool, project_id=self.project_id, thread_manager=self.thread_manager)
-        self.thread_manager.add_tool(SandboxDeployTool, project_id=self.project_id, thread_manager=self.thread_manager)
-        self.thread_manager.add_tool(SandboxExposeTool, project_id=self.project_id, thread_manager=self.thread_manager)
-        self.thread_manager.add_tool(SandboxWebSearchTool, project_id=self.project_id, thread_manager=self.thread_manager)
-        self.thread_manager.add_tool(SandboxVisionTool, project_id=self.project_id, thread_id=self.thread_id, thread_manager=self.thread_manager)
-        self.thread_manager.add_tool(SandboxImageEditTool, project_id=self.project_id, thread_id=self.thread_id, thread_manager=self.thread_manager)
-        self.thread_manager.add_tool(SandboxPresentationOutlineTool, project_id=self.project_id, thread_manager=self.thread_manager)
-        self.thread_manager.add_tool(SandboxPresentationToolV2, project_id=self.project_id, thread_manager=self.thread_manager)
-        self.thread_manager.add_tool(TaskListTool, project_id=self.project_id, thread_manager=self.thread_manager, thread_id=self.thread_id)
-        self.thread_manager.add_tool(SandboxSheetsTool, project_id=self.project_id, thread_manager=self.thread_manager)
-        self.thread_manager.add_tool(SandboxWebDevTool, project_id=self.project_id, thread_id=self.thread_id, thread_manager=self.thread_manager)
-        if config.RAPID_API_KEY:
-            self.thread_manager.add_tool(DataProvidersTool)
+        # self.thread_manager.add_tool(SandboxShellTool, project_id=self.project_id, thread_manager=self.thread_manager)
+        # self.thread_manager.add_tool(SandboxFilesTool, project_id=self.project_id, thread_manager=self.thread_manager)
+        # self.thread_manager.add_tool(SandboxDeployTool, project_id=self.project_id, thread_manager=self.thread_manager)
+        # self.thread_manager.add_tool(SandboxExposeTool, project_id=self.project_id, thread_manager=self.thread_manager)
+        # self.thread_manager.add_tool(SandboxWebSearchTool, project_id=self.project_id, thread_manager=self.thread_manager)
+        # self.thread_manager.add_tool(SandboxVisionTool, project_id=self.project_id, thread_id=self.thread_id, thread_manager=self.thread_manager)
+        # self.thread_manager.add_tool(SandboxImageEditTool, project_id=self.project_id, thread_id=self.thread_id, thread_manager=self.thread_manager)
+        # self.thread_manager.add_tool(SandboxPresentationOutlineTool, project_id=self.project_id, thread_manager=self.thread_manager)
+        # self.thread_manager.add_tool(SandboxPresentationToolV2, project_id=self.project_id, thread_manager=self.thread_manager)
+        # self.thread_manager.add_tool(TaskListTool, project_id=self.project_id, thread_manager=self.thread_manager, thread_id=self.thread_id)
+        # self.thread_manager.add_tool(SandboxSheetsTool, project_id=self.project_id, thread_manager=self.thread_manager)
+        # self.thread_manager.add_tool(SandboxWebDevTool, project_id=self.project_id, thread_id=self.thread_id, thread_manager=self.thread_manager)
+        # if config.RAPID_API_KEY:
+        #     self.thread_manager.add_tool(DataProvidersTool)
         
 
         
-        # Add Browser Tool
-        from agent.tools.browser_tool import BrowserTool
-        self.thread_manager.add_tool(BrowserTool, project_id=self.project_id, thread_id=self.thread_id, thread_manager=self.thread_manager)
+        # # Add Browser Tool
+        # from agent.tools.browser_tool import BrowserTool
+        # self.thread_manager.add_tool(BrowserTool, project_id=self.project_id, thread_id=self.thread_id, thread_manager=self.thread_manager)
     
     def register_agent_builder_tools(self, agent_id: str):
-        from agent.tools.agent_builder_tools.agent_config_tool import AgentConfigTool
-        from agent.tools.agent_builder_tools.mcp_search_tool import MCPSearchTool
-        from agent.tools.agent_builder_tools.credential_profile_tool import CredentialProfileTool
-        from agent.tools.agent_builder_tools.workflow_tool import WorkflowTool
-        from agent.tools.agent_builder_tools.trigger_tool import TriggerTool
-        from services.postgresql import DBConnection
+        pass
+        # from agent.tools.agent_builder_tools.agent_config_tool import AgentConfigTool
+        # from agent.tools.agent_builder_tools.mcp_search_tool import MCPSearchTool
+        # from agent.tools.agent_builder_tools.credential_profile_tool import CredentialProfileTool
+        # from agent.tools.agent_builder_tools.workflow_tool import WorkflowTool
+        # from agent.tools.agent_builder_tools.trigger_tool import TriggerTool
+        # from services.postgresql import DBConnection
         
-        db = DBConnection()
-        self.thread_manager.add_tool(AgentConfigTool, thread_manager=self.thread_manager, db_connection=db, agent_id=agent_id)
-        self.thread_manager.add_tool(MCPSearchTool, thread_manager=self.thread_manager, db_connection=db, agent_id=agent_id)
-        self.thread_manager.add_tool(CredentialProfileTool, thread_manager=self.thread_manager, db_connection=db, agent_id=agent_id)
-        self.thread_manager.add_tool(WorkflowTool, thread_manager=self.thread_manager, db_connection=db, agent_id=agent_id)
-        self.thread_manager.add_tool(TriggerTool, thread_manager=self.thread_manager, db_connection=db, agent_id=agent_id)
+        # db = DBConnection()
+        # self.thread_manager.add_tool(AgentConfigTool, thread_manager=self.thread_manager, db_connection=db, agent_id=agent_id)
+        # self.thread_manager.add_tool(MCPSearchTool, thread_manager=self.thread_manager, db_connection=db, agent_id=agent_id)
+        # self.thread_manager.add_tool(CredentialProfileTool, thread_manager=self.thread_manager, db_connection=db, agent_id=agent_id)
+        # self.thread_manager.add_tool(WorkflowTool, thread_manager=self.thread_manager, db_connection=db, agent_id=agent_id)
+        # self.thread_manager.add_tool(TriggerTool, thread_manager=self.thread_manager, db_connection=db, agent_id=agent_id)
     
     def register_custom_tools(self, enabled_tools: Dict[str, Any]):
-        self.thread_manager.add_tool(ExpandMessageTool, thread_id=self.thread_id, thread_manager=self.thread_manager)
-        self.thread_manager.add_tool(MessageTool)
-        self.thread_manager.add_tool(TaskListTool, project_id=self.project_id, thread_manager=self.thread_manager, thread_id=self.thread_id)
+        pass
+        # self.thread_manager.add_tool(ExpandMessageTool, thread_id=self.thread_id, thread_manager=self.thread_manager)
+        # self.thread_manager.add_tool(MessageTool)
+        # self.thread_manager.add_tool(TaskListTool, project_id=self.project_id, thread_manager=self.thread_manager, thread_id=self.thread_id)
 
-        def safe_tool_check(tool_name: str) -> bool:
-            try:
-                if not isinstance(enabled_tools, dict):
-                    return False
-                tool_config = enabled_tools.get(tool_name, {})
-                if not isinstance(tool_config, dict):
-                    return bool(tool_config) if isinstance(tool_config, bool) else False
-                return tool_config.get('enabled', False)
-            except Exception:
-                return False
+        # def safe_tool_check(tool_name: str) -> bool:
+        #     try:
+        #         if not isinstance(enabled_tools, dict):
+        #             return False
+        #         tool_config = enabled_tools.get(tool_name, {})
+        #         if not isinstance(tool_config, dict):
+        #             return bool(tool_config) if isinstance(tool_config, bool) else False
+        #         return tool_config.get('enabled', False)
+        #     except Exception:
+        #         return False
         
-        if safe_tool_check('sb_shell_tool'):
-            self.thread_manager.add_tool(SandboxShellTool, project_id=self.project_id, thread_manager=self.thread_manager)
-        if safe_tool_check('sb_files_tool'):
-            self.thread_manager.add_tool(SandboxFilesTool, project_id=self.project_id, thread_manager=self.thread_manager)
-        if safe_tool_check('sb_deploy_tool'):
-            self.thread_manager.add_tool(SandboxDeployTool, project_id=self.project_id, thread_manager=self.thread_manager)
-        if safe_tool_check('sb_expose_tool'):
-            self.thread_manager.add_tool(SandboxExposeTool, project_id=self.project_id, thread_manager=self.thread_manager)
-        if safe_tool_check('web_search_tool'):
-            self.thread_manager.add_tool(SandboxWebSearchTool, project_id=self.project_id, thread_manager=self.thread_manager)
-        if safe_tool_check('sb_vision_tool'):
-            self.thread_manager.add_tool(SandboxVisionTool, project_id=self.project_id, thread_id=self.thread_id, thread_manager=self.thread_manager)
-        if safe_tool_check('sb_presentation_tool'):
-            self.thread_manager.add_tool(SandboxPresentationOutlineTool, project_id=self.project_id, thread_manager=self.thread_manager)
-            self.thread_manager.add_tool(SandboxPresentationToolV2, project_id=self.project_id, thread_manager=self.thread_manager)
-        if safe_tool_check('sb_image_edit_tool'):
-            self.thread_manager.add_tool(SandboxImageEditTool, project_id=self.project_id, thread_id=self.thread_id, thread_manager=self.thread_manager)
-        if safe_tool_check('sb_sheets_tool'):
-            self.thread_manager.add_tool(SandboxSheetsTool, project_id=self.project_id, thread_manager=self.thread_manager)
-        if safe_tool_check('sb_web_dev_tool'):
-            self.thread_manager.add_tool(SandboxWebDevTool, project_id=self.project_id, thread_id=self.thread_id, thread_manager=self.thread_manager)
-        if config.RAPID_API_KEY and safe_tool_check('data_providers_tool'):
-            self.thread_manager.add_tool(DataProvidersTool)
+        # if safe_tool_check('sb_shell_tool'):
+        #     self.thread_manager.add_tool(SandboxShellTool, project_id=self.project_id, thread_manager=self.thread_manager)
+        # if safe_tool_check('sb_files_tool'):
+        #     self.thread_manager.add_tool(SandboxFilesTool, project_id=self.project_id, thread_manager=self.thread_manager)
+        # if safe_tool_check('sb_deploy_tool'):
+        #     self.thread_manager.add_tool(SandboxDeployTool, project_id=self.project_id, thread_manager=self.thread_manager)
+        # if safe_tool_check('sb_expose_tool'):
+        #     self.thread_manager.add_tool(SandboxExposeTool, project_id=self.project_id, thread_manager=self.thread_manager)
+        # if safe_tool_check('web_search_tool'):
+        #     self.thread_manager.add_tool(SandboxWebSearchTool, project_id=self.project_id, thread_manager=self.thread_manager)
+        # if safe_tool_check('sb_vision_tool'):
+        #     self.thread_manager.add_tool(SandboxVisionTool, project_id=self.project_id, thread_id=self.thread_id, thread_manager=self.thread_manager)
+        # if safe_tool_check('sb_presentation_tool'):
+        #     self.thread_manager.add_tool(SandboxPresentationOutlineTool, project_id=self.project_id, thread_manager=self.thread_manager)
+        #     self.thread_manager.add_tool(SandboxPresentationToolV2, project_id=self.project_id, thread_manager=self.thread_manager)
+        # if safe_tool_check('sb_image_edit_tool'):
+        #     self.thread_manager.add_tool(SandboxImageEditTool, project_id=self.project_id, thread_id=self.thread_id, thread_manager=self.thread_manager)
+        # if safe_tool_check('sb_sheets_tool'):
+        #     self.thread_manager.add_tool(SandboxSheetsTool, project_id=self.project_id, thread_manager=self.thread_manager)
+        # if safe_tool_check('sb_web_dev_tool'):
+        #     self.thread_manager.add_tool(SandboxWebDevTool, project_id=self.project_id, thread_id=self.thread_id, thread_manager=self.thread_manager)
+        # if config.RAPID_API_KEY and safe_tool_check('data_providers_tool'):
+        #     self.thread_manager.add_tool(DataProvidersTool)
 
         
-        if safe_tool_check('browser_tool'):
-            from agent.tools.browser_tool import BrowserTool
-            self.thread_manager.add_tool(BrowserTool, project_id=self.project_id, thread_id=self.thread_id, thread_manager=self.thread_manager)
+        # if safe_tool_check('browser_tool'):
+        #     from agent.tools.browser_tool import BrowserTool
+        #     self.thread_manager.add_tool(BrowserTool, project_id=self.project_id, thread_id=self.thread_id, thread_manager=self.thread_manager)
 
 
 # class MCPManager:
@@ -327,7 +331,6 @@ class PromptManager:
         system_content += datetime_info
 
         return {"role": "system", "content": system_content}
-
 
 class MessageManager:
     """
@@ -512,32 +515,36 @@ class AgentRunner:
         
     async def setup_tools(self):
         tool_manager = ToolManager(self.thread_manager, self.config.project_id, self.config.thread_id)
-        
-        if self.config.agent_config and self.config.agent_config.get('is_suna_default', False):
-            suna_agent_id = self.config.agent_config['agent_id']
-            tool_manager.register_agent_builder_tools(suna_agent_id)
-        
-        if self.config.is_agent_builder:
-            tool_manager.register_agent_builder_tools(self.config.target_agent_id)
 
-        enabled_tools = None
-        if self.config.agent_config and 'agentpress_tools' in self.config.agent_config:
-            raw_tools = self.config.agent_config['agentpress_tools']
-            
-            if isinstance(raw_tools, dict):
-                if self.config.agent_config.get('is_suna_default', False) and not raw_tools:
-                    enabled_tools = None
-                else:
-                    enabled_tools = raw_tools
-            else:
-                enabled_tools = None
-
-        if enabled_tools is None:
+        if self.config.agent_config and self.config.agent_config.get('is_fufanmanus_default', False):
             tool_manager.register_all_tools()
-        else:
-            if not isinstance(enabled_tools, dict):
-                enabled_tools = {}
-            tool_manager.register_custom_tools(enabled_tools)
+            logger.info("register all tools success！")
+        # TODO： 自定义工具逻辑
+        # if self.config.agent_config and self.config.agent_config.get('is_fufanmanus_default', False):
+        #     fufanmanus_agent_id = self.config.agent_config['agent_id']
+        #     tool_manager.register_agent_builder_tools(fufanmanus_agent_id)
+        
+        # if self.config.is_agent_builder:
+        #     tool_manager.register_agent_builder_tools(self.config.target_agent_id)
+
+        # enabled_tools = None
+        # if self.config.agent_config and 'agentpress_tools' in self.config.agent_config:
+        #     raw_tools = self.config.agent_config['agentpress_tools']
+            
+        #     if isinstance(raw_tools, dict):
+        #         if self.config.agent_config.get('is_suna_default', False) and not raw_tools:
+        #             enabled_tools = None
+        #         else:
+        #             enabled_tools = raw_tools
+        #     else:
+        #         enabled_tools = None
+
+        # if enabled_tools is None:
+        #     tool_manager.register_all_tools()
+        # else:
+        #     if not isinstance(enabled_tools, dict):
+        #         enabled_tools = {}
+        #     tool_manager.register_custom_tools(enabled_tools)
     
     # async def setup_mcp_tools(self) -> Optional[MCPToolWrapper]:
     #     if not self.config.agent_config:
@@ -560,7 +567,8 @@ class AgentRunner:
     
     async def run(self) -> AsyncGenerator[Dict[str, Any], None]:
         await self.setup()
-        # await self.setup_tools()
+        await self.setup_tools()
+
         # mcp_wrapper_instance = await self.setup_mcp_tools()
         
         # system_message = await PromptManager.build_system_prompt(
@@ -636,7 +644,11 @@ class AgentRunner:
             # max_tokens = self.get_max_tokens()
             
             generation = self.config.trace.generation(name="thread_manager.run_thread") if self.config.trace else None
-            try:
+            try:          
+                # 获取可用函数
+                available_functions = self.thread_manager.tool_registry.get_available_functions()
+                logger.info(f"Get available functions: {list(available_functions.keys())}")
+                
                 response = await self.thread_manager.run_thread( 
                         thread_id=self.config.thread_id,
                         system_prompt=system_message,
@@ -646,6 +658,7 @@ class AgentRunner:
                         # llm_max_tokens=max_tokens,
                         llm_max_tokens=1024,
                         tool_choice="auto",
+                        available_functions = available_functions,
                         max_xml_tool_calls=1,
                         temporary_message=temporary_message,
                         processor_config=ProcessorConfig(
