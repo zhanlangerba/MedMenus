@@ -662,11 +662,9 @@ class ResponseProcessor:
                                         # 提取工具调用结果
                                         func_response = part.function_response
                                         # 从pending_tool_executions列表中找到对应的工具调用                        
-                                        matching_execution = None
                                         for execution in pending_tool_executions:
                                             if execution["tool_call"]["id"] == func_response.id:
                                                 context = execution["context"]
-                                                matching_execution = execution
                                                 break
                                                                                                                    
                                         raw_response = func_response.response
@@ -697,11 +695,7 @@ class ResponseProcessor:
                                             "tool_call_id": func_response.id
                                         })
                                         
-                                        if matching_execution:
-                                            yielded_tool_indices.add(matching_execution["tool_index"])
-                                        else:
-                                            logger.warning(f"Could not find matching execution for func_response.id={func_response.id}")
-                                            yielded_tool_indices.add(func_response.id)  # Fallback to ID
+                                        yielded_tool_indices.add(tool_index)
 
                                         # # TODO：处理人机交互情况
                                         # if func_response.name in ['ask', 'complete']:
@@ -921,13 +915,7 @@ class ResponseProcessor:
                         status_message=f"Saving and yielding {len(tool_results_map)} final tool result messages"
                     )
                     for tool_idx in sorted(tool_results_map.keys()):
-                        # Skip tools that were already yielded in the main streaming loop
-                        if tool_idx in yielded_tool_indices:
-                            logger.info(f"⏭️ Skipping tool_idx={tool_idx} in post-processing (already yielded in main loop)")
-                            continue
-                            
                         tool_call, result, context = tool_results_map[tool_idx]
-                        logger.info(f"🔄 Processing tool_idx={tool_idx} in post-processing (not yet yielded)")
                         logger.info(f"tool_idx: {tool_idx}, tool_call: {tool_call}, result: {result}, context: {context}")
                         context.result = result
                         logger.info(f"context.result: {context.result}")
