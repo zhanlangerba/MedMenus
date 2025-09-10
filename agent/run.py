@@ -689,10 +689,10 @@ class AgentRunner:
                 adk_call_completed = False  # ✅ 标记单次ADK调用是否完成
 
                 try:
+                    all_chunk = []
                     if hasattr(response, '__aiter__') and not isinstance(response, dict):
                         async for chunk in response:
-                            print(f"🔍 收到ADK事件: {chunk}")
-                            
+                            print(f"current chunk: {chunk}")
                             # ✅ 基于实际事件格式的处理逻辑
                             if isinstance(chunk, dict):
                                 chunk_type = chunk.get('type')
@@ -771,10 +771,11 @@ class AgentRunner:
                         if not adk_call_completed:
                             adk_call_completed = True
                             logger.info(f"🏁 ADK事件流耗尽，单次调用完成")
-                            
+
+                      
                     else:
                         error_detected = True
-
+                    logger.info(f"123all_chunk: {all_chunk}")    
                 except Exception as stream_error:
                     error_msg = f"Error during response streaming: {str(stream_error)}"
                     logger.error(error_msg)
@@ -1101,7 +1102,13 @@ class AgentRunner:
                     text_content = ""
                     for part in content.parts:
                         if hasattr(part, 'text'):
-                            text_content += part.text
+                            # 🔧 确保类型安全，防止字符串拼接错误
+                            part_text = part.text
+                            if isinstance(part_text, list):
+                                part_text = ''.join(str(item) for item in part_text)
+                            elif not isinstance(part_text, str):
+                                part_text = str(part_text)
+                            text_content += part_text
                     
                     return {
                         "type": "assistant",

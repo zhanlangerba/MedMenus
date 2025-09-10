@@ -63,7 +63,8 @@ class SimpleTestTool(Tool):
         print(f"📢 Test Echo: {message}")
         
         return {
-            "original": message,
-            "echoed": f"You said: {message}",
-            "length": len(message)
+            "success": True,
+            "result": message,
+            "operation": "operation",
+            "message": f"{message}"
         } 
