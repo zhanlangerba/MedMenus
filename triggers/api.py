@@ -1,19 +1,19 @@
-from fastapi import APIRouter, HTTPException, Depends, Request, Body, Query
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, HTTPException, Depends, Request, Body, Query # type: ignore
+from fastapi.responses import JSONResponse # type: ignore
 from typing import List, Optional, Dict, Any
-from pydantic import BaseModel
+from pydantic import BaseModel # type: ignore
 import os
 import uuid
 from datetime import datetime, timezone
 import json
 import hmac
 
-from services.supabase import DBConnection
-from utils.auth_utils import get_current_user_id_from_jwt
+from services.postgresql import DBConnection 
+from utils.simple_auth_middleware import get_current_user_id_from_jwt, get_user_id_from_stream_auth, verify_thread_access
 from utils.logger import logger
 from flags.flags import is_enabled
 from utils.config import config
-from services.billing import check_billing_status, can_use_model
+# from services.billing import check_billing_status, can_use_model
 
 from .trigger_service import get_trigger_service, TriggerType
 from .provider_service import get_provider_service
@@ -133,7 +133,7 @@ def initialize(database: DBConnection):
 
 async def verify_agent_access(agent_id: str, user_id: str):
     client = await db.client
-    result = await client.table('agents').select('agent_id').eq('agent_id', agent_id).eq('account_id', user_id).execute()
+    result = await client.table('agents').select('agent_id').eq('agent_id', agent_id).eq('user_id', user_id).execute()
     
     if not result.data:
         raise HTTPException(status_code=404, detail="Agent not found or access denied")
@@ -587,6 +587,7 @@ def convert_steps_to_json(steps: List[WorkflowStepRequest]) -> List[Dict[str, An
             step_dict['children'] = convert_steps_to_json(step.children)
         result.append(step_dict)
     return result
+
 
 
 @workflows_router.get("/agents/{agent_id}/workflows")

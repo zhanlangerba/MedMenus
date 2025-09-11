@@ -1,7 +1,7 @@
 from typing import Optional
 import uuid
 
-from agentpress.thread_manager import ADKThreadManager
+from agentpress.adk_thread_manager import ADKThreadManager
 from agentpress.tool import Tool
 from daytona_sdk import AsyncSandbox  # type: ignore
 from sandbox.sandbox import get_or_start_sandbox, create_sandbox, delete_sandbox
@@ -32,12 +32,13 @@ class SandboxToolsBase(Tool):
             try:
                 # 获取数据库客户端
                 client = await self.thread_manager.db.client
-
+            
                 # 获取项目数据
                 project = await client.table('projects').select('*').eq('project_id', self.project_id).execute()
                 if not project.data or len(project.data) == 0:
                     raise ValueError(f"Project {self.project_id} not found")
 
+                logger.info(f"Project data: {project.data}")
                 project_data = project.data[0]
                 sandbox_info = project_data.get('sandbox') or {}
 

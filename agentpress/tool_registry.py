@@ -43,13 +43,32 @@ class ToolRegistry:
         # ADK会自动从函数签名和docstring推断schema
         # 检查工具实例的方法
         for method_name in dir(tool_instance):
-            method = getattr(tool_instance, method_name)
+            # 🔧 安全地获取属性，跳过可能有问题的类定义和属性
+            try:
+                # 预先过滤：跳过明显的类定义和非方法属性
+                if (method_name.startswith('_') or 
+                    method_name in ['get_schemas', 'success_response', 'fail_response']):
+                    continue
+                
+                # 检查是否是类属性（通常是类定义）
+                class_attr = getattr(tool_instance.__class__, method_name, None)
+                if class_attr is not None and isinstance(class_attr, type):
+                    logger.debug(f"Skipping class definition: {method_name}")
+                    continue
+                
+                # 安全地获取实例属性
+                method = getattr(tool_instance, method_name)
             
-            # 只处理公共的可调用方法（排除私有方法和属性）
-            if (not method_name.startswith('_') and 
-                callable(method) and 
-                hasattr(method, '__self__') and  # 确保是绑定方法
-                method_name not in ['get_schemas', 'success_response', 'fail_response']):  # 排除基类方法
+                # 只处理真正的可调用方法
+                if not (callable(method) and hasattr(method, '__self__')):
+                    continue
+                    
+            except Exception as e:
+                logger.warning(f"Skipped problematic attribute '{method_name}' in {tool_class.__name__}: {e}")
+                continue
+            
+            # 只处理公共的可调用方法（已经过滤过了）
+            if True:
                 
                 if function_names is None or method_name in function_names:
                     # 🎯 简化存储：只保存工具实例，让ADK处理其余部分

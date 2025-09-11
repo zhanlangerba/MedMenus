@@ -392,17 +392,10 @@ class ADKThreadManager:
                         prepared_messages.append(temp_msg)
                         logger.info("Added temporary message to the end of prepared messages")
 
-                # 添加部分助手内容，用于自动继续上下文（不保存到DB）
-                if auto_continue_count > 0 and continuous_state.get('accumulated_content'):
-                    partial_content = continuous_state.get('accumulated_content', '')
-                    
-                    # 创建临时助手消息，仅包含文本内容
-                    temporary_assistant_message = {
-                        "role": "assistant",
-                        "content": partial_content
-                    }
-                    prepared_messages.append(temporary_assistant_message)
-                    logger.info(f"Added temporary assistant message with {len(partial_content)} chars for auto-continue context")
+                # 🔧 修复：移除可能导致重复输出的临时助手消息逻辑
+                # Agent应该基于数据库中已保存的消息历史来自动继续，而不是重复临时内容
+                if auto_continue_count > 0:
+                    logger.info(f"Auto-continue round {auto_continue_count}: using existing message history as context")
      
                 prepared_messages = self.context_manager.compress_messages(prepared_messages, llm_model)
 

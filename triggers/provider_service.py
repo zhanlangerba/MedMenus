@@ -7,9 +7,9 @@ from typing import Dict, Any, Optional, List
 
 import croniter
 import pytz
-from services.supabase import DBConnection
+from services.postgresql import DBConnection
 
-from services.supabase import DBConnection
+from services.postgresql import DBConnection
 from utils.logger import logger
 from utils.config import config, EnvMode
 from .trigger_service import Trigger, TriggerEvent, TriggerResult, TriggerType

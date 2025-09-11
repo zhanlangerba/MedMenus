@@ -568,7 +568,12 @@ async def make_adk_api_call(
     model = LiteLlm(
         model=resolved_model,
         api_key=resolved_api_key
-    )
+    )    
+    # model = LiteLlm(
+    #     model="deepseek/deepseek-chat",  
+    #     api_key="sk-77ef05a6295b44579f7cc72ab4a537dd",
+    #     base_url="https://api.deepseek.com"
+    # )
     logger.info(f"Model created successfully: model={resolved_model}, provider={provider}")
 
     # 提取 system_prompt

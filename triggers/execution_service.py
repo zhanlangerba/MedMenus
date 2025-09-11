@@ -3,7 +3,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Dict, Any, Tuple
 
-from services.supabase import DBConnection
+from services.postgresql import DBConnection
 from services import redis
 from utils.logger import logger, structlog
 from utils.config import config

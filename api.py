@@ -35,7 +35,7 @@ from sandbox import api as sandbox_api
 # from services import transcription as transcription_api
 # 
 # from services import email_api
-# from triggers import api as triggers_api
+
 # from services import api_keys_api
 
 # 强制 asyncio 使用 Proactor 事件循环，以确保异步 I/O 的兼容性和稳定性。
@@ -149,14 +149,20 @@ if config.ENV_MODE == EnvMode.LOCAL:
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # 临时允许所有源，用于调试
-    allow_credentials=False,  # 当使用 "*" 时必须设为 False
-    allow_methods=["*"],  # 允许所有方法
-    allow_headers=["*"],  # 允许所有头部
+    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"] if config.ENV_MODE == EnvMode.LOCAL else ["*"],
+    allow_credentials=True,  # 允许认证凭据
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],  # 显式指定方法
+    allow_headers=["Authorization", "Content-Type", "Accept", "Origin", "X-Requested-With"],  # 显式指定头部
 )
 
 # 创建主API路由
 api_router = APIRouter()
+
+# 添加通用的OPTIONS处理器
+@app.options("/{path:path}")
+async def options_handler(path: str):
+    """Handle OPTIONS preflight requests"""
+    return {"message": "OK"}
 
 # 包含认证路由
 from auth.api import router as auth_router
@@ -172,6 +178,9 @@ api_router.include_router(agent_api.router)
 from agent.versioning.api import router as versioning_router
 api_router.include_router(versioning_router)  
 api_router.include_router(sandbox_api.router)
+
+from triggers import api as triggers_api
+api_router.include_router(triggers_api.router)
 # api_router.include_router(billing_api.router)
 
 # api_router.include_router(api_keys_api.router)
@@ -190,7 +199,7 @@ api_router.include_router(sandbox_api.router)
 # from knowledge_base import api as knowledge_base_api
 # api_router.include_router(knowledge_base_api.router)
 
-# api_router.include_router(triggers_api.router)
+# 
 
 # from pipedream import api as pipedream_api
 # api_router.include_router(pipedream_api.router)

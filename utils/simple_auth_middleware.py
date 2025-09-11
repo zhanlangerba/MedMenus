@@ -19,6 +19,10 @@ async def get_current_user_id_from_jwt(
     从JWT token中提取用户ID
     这个函数替代原来的 get_current_user_id_from_jwt，保持接口兼容
     """
+    # 对于OPTIONS请求，跳过认证检查
+    if request.method == "OPTIONS":
+        return "anonymous"  # 返回一个占位符，不会被使用
+        
     # 检查Authorization头
     auth_header = request.headers.get('Authorization')
     

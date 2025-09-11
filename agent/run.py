@@ -78,7 +78,10 @@ class ToolManager:
         # 🧪 测试现有工具注册流程
         from agent.tools.simple_test_tool import SimpleTestTool
         self.thread_manager.add_tool(SimpleTestTool)
-        logger.info("✅ Registered test tool: SimpleTestTool")
+
+        from agent.tools.task_list_tool_simple import TaskListToolSimple
+        self.thread_manager.add_tool(TaskListToolSimple, project_id=self.project_id, thread_manager=self.thread_manager, thread_id=self.thread_id)
+        logger.info("Successfully registered task list tool: TaskListTool (with enhanced registry)")
         
         # self.thread_manager.add_tool(SandboxShellTool, project_id=self.project_id, thread_manager=self.thread_manager)
         # self.thread_manager.add_tool(SandboxFilesTool, project_id=self.project_id, thread_manager=self.thread_manager)
@@ -515,43 +518,10 @@ class AgentRunner:
         
     async def setup_tools(self):
         tool_manager = ToolManager(self.thread_manager, self.config.project_id, self.config.thread_id)
-
         if self.config.agent_config and self.config.agent_config.get('is_fufanmanus_default', False):
             tool_manager.register_all_tools()
             logger.info("register all tools success！")
-        # TODO： 自定义工具逻辑
-        # if self.config.agent_config and self.config.agent_config.get('is_fufanmanus_default', False):
-        #     fufanmanus_agent_id = self.config.agent_config['agent_id']
-        #     tool_manager.register_agent_builder_tools(fufanmanus_agent_id)
-        
-        # if self.config.is_agent_builder:
-        #     tool_manager.register_agent_builder_tools(self.config.target_agent_id)
 
-        # enabled_tools = None
-        # if self.config.agent_config and 'agentpress_tools' in self.config.agent_config:
-        #     raw_tools = self.config.agent_config['agentpress_tools']
-            
-        #     if isinstance(raw_tools, dict):
-        #         if self.config.agent_config.get('is_suna_default', False) and not raw_tools:
-        #             enabled_tools = None
-        #         else:
-        #             enabled_tools = raw_tools
-        #     else:
-        #         enabled_tools = None
-
-        # if enabled_tools is None:
-        #     tool_manager.register_all_tools()
-        # else:
-        #     if not isinstance(enabled_tools, dict):
-        #         enabled_tools = {}
-        #     tool_manager.register_custom_tools(enabled_tools)
-    
-    # async def setup_mcp_tools(self) -> Optional[MCPToolWrapper]:
-    #     if not self.config.agent_config:
-    #         return None
-        
-    #     mcp_manager = MCPManager(self.thread_manager, self.account_id)
-    #     return await mcp_manager.register_mcp_tools(self.config.agent_config)
     
     def get_max_tokens(self) -> Optional[int]:
         if "sonnet" in self.config.model_name.lower():
@@ -685,100 +655,81 @@ class AgentRunner:
                 agent_should_terminate = False
                 error_detected = False
                 full_response = ""
-                final_response_text = None  # ✅ 用于存储is_final_response的内容
-                adk_call_completed = False  # ✅ 标记单次ADK调用是否完成
 
                 try:
-                    all_chunk = []
                     if hasattr(response, '__aiter__') and not isinstance(response, dict):
                         async for chunk in response:
-                            print(f"current chunk: {chunk}")
-                            # ✅ 基于实际事件格式的处理逻辑
-                            if isinstance(chunk, dict):
-                                chunk_type = chunk.get('type')
-                                chunk_content = chunk.get('content', '{}')
-                                chunk_metadata = chunk.get('metadata', '{}')
-                                
-                                # 解析JSON字符串
+                            if isinstance(chunk, dict) and chunk.get('type') == 'status' and chunk.get('status') == 'error':
+                                error_detected = True
+                                yield chunk
+                                continue
+                            
+                            if chunk.get('type') == 'status':
                                 try:
-                                    if isinstance(chunk_content, str):
-                                        content_data = json.loads(chunk_content)
-                                    else:
-                                        content_data = chunk_content
+                                    metadata = chunk.get('metadata', {})
+                                    if isinstance(metadata, str):
+                                        metadata = json.loads(metadata)
+                                    
+                                    if metadata.get('agent_should_terminate'):
+                                        agent_should_terminate = True
                                         
-                                    if isinstance(chunk_metadata, str):
-                                        metadata_data = json.loads(chunk_metadata)
+                                        content = chunk.get('content', {})
+                                        if isinstance(content, str):
+                                            content = json.loads(content)
+                                        
+                                        if content.get('function_name'):
+                                            last_tool_call = content['function_name']
+                                        elif content.get('xml_tag_name'):
+                                            last_tool_call = content['xml_tag_name']
+                                            
+                                except Exception:
+                                    pass
+                            
+                            if chunk.get('type') == 'assistant' and 'content' in chunk:
+                                try:
+                                    content = chunk.get('content', '{}')
+                                    if isinstance(content, str):
+                                        assistant_content_json = json.loads(content)
                                     else:
-                                        metadata_data = chunk_metadata
-                                except json.JSONDecodeError:
-                                    content_data = {}
-                                    metadata_data = {}
-                                
-                                # ✅ 检查assistant消息的完成状态
-                                if chunk_type == 'assistant' and metadata_data.get('stream_status') == 'complete':
-                                    if content_data.get('content'):
-                                        final_response_text = content_data['content']
-                                        logger.info(f"🎯 检测到完整assistant回复: {final_response_text[:100]}...")
-                                
-                                # ✅ 检查finish状态（类似is_final_response）
-                                elif chunk_type == 'status' and content_data.get('status_type') == 'finish':
-                                    if content_data.get('finish_reason') == 'final':
-                                        logger.info(f"🏁 检测到final finish状态")
-                                        # 这表示当前回合的最终响应
-                                
-                                # ✅ 检查thread_run_end（调用完全结束）
-                                elif chunk_type == 'status' and content_data.get('status_type') == 'thread_run_end':
-                                    logger.info(f"🎯 检测到thread_run_end，ADK调用完全结束")
-                                    adk_call_completed = True
-                                
-                                # ✅ 检查错误状态
-                                elif chunk_type == 'status' and chunk.get('status') == 'error':
-                                    error_detected = True
-                                    yield chunk
-                                    continue
-                        
-                                # ✅ 检查工具调用和终止条件 (如果还有其他逻辑需要)
-                                if chunk_type == 'assistant':
-                                    # 🔧 从ADK格式中正确提取文本
-                                    assistant_text = ""
-                                    if content_data.get('content'):
-                                        # 旧格式：{"content": "text"}
-                                        assistant_text = str(content_data['content'])
-                                    elif content_data.get('parts'):
-                                        # ADK格式：{"role": "model", "parts": [{"text": "..."}]}
-                                        for part in content_data['parts']:
-                                            if isinstance(part, dict) and 'text' in part:
-                                                assistant_text += str(part['text'])
-                                    
-                                    if assistant_text:
-                                        full_response += assistant_text
-                                    
-                                    # 检查XML工具调用
+                                        assistant_content_json = content
+
+                                    assistant_text = assistant_content_json.get('content', '')
+                                    full_response += assistant_text
                                     if isinstance(assistant_text, str):
-                                        if '</ask>' in assistant_text:
-                                            last_tool_call = 'ask'
-                                            agent_should_terminate = True
-                                        elif '</complete>' in assistant_text:
-                                            last_tool_call = 'complete' 
-                                            agent_should_terminate = True
-                                        elif '</web-browser-takeover>' in assistant_text:
-                                            last_tool_call = 'web-browser-takeover'
-                                            agent_should_terminate = True
+                                        if '</ask>' in assistant_text or '</complete>' in assistant_text or '</web-browser-takeover>' in assistant_text:
+                                            if '</ask>' in assistant_text:
+                                                xml_tool = 'ask'
+                                            elif '</complete>' in assistant_text:
+                                                xml_tool = 'complete'
+                                            elif '</web-browser-takeover>' in assistant_text:
+                                                xml_tool = 'web-browser-takeover'
+
+                                            last_tool_call = xml_tool
+                                
+                                except json.JSONDecodeError:
+                                    pass
+                                except Exception:
+                                    pass
 
                             yield chunk
-                        
-                        # ✅ 当async for循环结束时，说明事件流耗尽
-                        if not adk_call_completed:
-                            adk_call_completed = True
-                            logger.info(f"🏁 ADK事件流耗尽，单次调用完成")
-
-                      
                     else:
                         error_detected = True
-                    logger.info(f"123all_chunk: {all_chunk}")    
-                except Exception as stream_error:
-                    error_msg = f"Error during response streaming: {str(stream_error)}"
-                    logger.error(error_msg)
+
+                    if error_detected:
+                        if generation:
+                            generation.end(output=full_response, status_message="error_detected", level="ERROR")
+                        break
+                        
+                    if agent_should_terminate or last_tool_call in ['ask', 'complete', 'web-browser-takeover']:
+                        if generation:
+                            generation.end(output=full_response, status_message="agent_stopped")
+                        continue_execution = False
+                    else:
+                        # ✅ 正常完成一轮对话后，也要终止循环（除非需要继续执行任务）
+                        continue_execution = False
+
+                except Exception as e:
+                    error_msg = f"Error during response streaming: {str(e)}"
                     if generation:
                         generation.end(output=full_response, status_message=error_msg, level="ERROR")
                     yield {
@@ -788,9 +739,8 @@ class AgentRunner:
                     }
                     break
                      
-            except Exception as run_error:
-                error_msg = f"Error running thread: {str(run_error)}"
-                logger.error(error_msg)
+            except Exception as e:
+                error_msg = f"Error running thread: {str(e)}"
                 yield {
                     "type": "status",
                     "status": "error", 
@@ -798,137 +748,123 @@ class AgentRunner:
                 }
                 break
             
-            # ✅ 外层循环终止判断（基于实际事件）
-            if error_detected:
-                logger.info(f"🚨 检测到错误，终止执行")
-                if generation:
-                    generation.end(output=full_response, status_message="error_detected", level="ERROR")
-                break
-                
-            # ✅ 基于实际ADK事件的终止判断
-            if agent_should_terminate or last_tool_call in ['ask', 'complete', 'web-browser-takeover']:
-                logger.info(f"🛑 Agent明确终止: agent_should_terminate={agent_should_terminate}, last_tool_call={last_tool_call}")
-                if generation:
-                    generation.end(output=full_response, status_message="agent_stopped")
-                continue_execution = False
-                logger.info(f"🛑 设置continue_execution=False，应该退出循环")
-                
-            elif adk_call_completed and final_response_text:
-                # ✅ ADK调用完成且有最终响应文本
-                logger.info(f"✅ ADK调用完成且有最终响应，默认终止外层循环")
-                logger.info(f"📝 最终响应预览: {final_response_text[:200]}...")
-                continue_execution = False
-                
-            elif adk_call_completed and not final_response_text:
-                # ✅ ADK调用完成但没有最终响应文本，可能需要继续
-                logger.info(f"⚠️ ADK调用完成但无最终响应文本，继续下一次迭代") 
-                # continue_execution保持True，继续下一次迭代
-                
-            else:
-                # ✅ 其他情况
-                logger.info(f"❓ 未明确的ADK状态 (completed={adk_call_completed}, final_text={bool(final_response_text)})，继续尝试")
-            
             if generation:
                 generation.end(output=full_response)
 
-        # 🔍 循环结束日志
-        logger.info(f"🏁 Agent执行循环结束: continue_execution={continue_execution}, iteration_count={iteration_count}")
-        logger.info(f"🏁 最终状态: max_iterations={self.config.max_iterations}")
-        #                     # ✅ 官方推荐：用is_final_response()获取最终可展示文本
-        #                     if hasattr(chunk, 'is_final_response') and chunk.is_final_response():
-        #                         if hasattr(chunk, 'content') and chunk.content and hasattr(chunk.content, 'parts') and chunk.content.parts:
-        #                             final_response_text = chunk.content.parts[0].text
-        #                             logger.info(f"🎯 检测到final_response: {final_response_text[:100]}...")
-                            
-        #                     if isinstance(chunk, dict) and chunk.get('type') == 'status' and chunk.get('status') == 'error':
-        #                         error_detected = True
-        #                         yield chunk
-        #                         continue
-                            
-        #                     if chunk.get('type') == 'status':
-        #                         try:
-        #                             metadata = chunk.get('metadata', {})
-        #                             if isinstance(metadata, str):
-        #                                 metadata = json.loads(metadata)
-                                    
-        #                             if metadata.get('agent_should_terminate'):
-        #                                 agent_should_terminate = True
-                                        
-        #                                 content = chunk.get('content', {})
-        #                                 if isinstance(content, str):
-        #                                     content = json.loads(content)
-                                        
-        #                                 if content.get('function_name'):
-        #                                     last_tool_call = content['function_name']
-        #                                 elif content.get('xml_tag_name'):
-        #                                     last_tool_call = content['xml_tag_name']
-                                            
-        #                         except Exception:
-        #                             pass
-                            
-        #                     if chunk.get('type') == 'assistant' and 'content' in chunk:
-        #                         try:
-        #                             content = chunk.get('content', '{}')
-        #                             if isinstance(content, str):
-        #                                 assistant_content_json = json.loads(content)
-        #                             else:
-        #                                 assistant_content_json = content
+        asyncio.create_task(asyncio.to_thread(lambda: langfuse.flush()))
+        #         if isinstance(response, dict) and "status" in response and response["status"] == "error":
+        #             yield response
+        #             break
 
-        #                             assistant_text = assistant_content_json.get('content', '')
-        #                             full_response += assistant_text
-        #                             if isinstance(assistant_text, str):
-        #                                 if '</ask>' in assistant_text or '</complete>' in assistant_text or '</web-browser-takeover>' in assistant_text:
-        #                                    if '</ask>' in assistant_text:
-        #                                        xml_tool = 'ask'
-        #                                    elif '</complete>' in assistant_text:
-        #                                        xml_tool = 'complete'
-        #                                    elif '</web-browser-takeover>' in assistant_text:
-        #                                        xml_tool = 'web-browser-takeover'
+        #         last_tool_call = None
+        #         agent_should_terminate = False
+        #         error_detected = False
+        #         full_response = ""
+        #         final_response_text = None  # ✅ 用于存储is_final_response的内容
+        #         adk_call_completed = False  # ✅ 标记单次ADK调用是否完成
 
-        #                                    last_tool_call = xml_tool
+        #         try:
+        #             all_chunk = []
+        #             if hasattr(response, '__aiter__') and not isinstance(response, dict):
+        #                 async for chunk in response:
+        #                     print(f"current chunk: {chunk}")
+        #                     # ✅ 基于实际事件格式的处理逻辑
+        #                     if isinstance(chunk, dict):
+        #                         chunk_type = chunk.get('type')
+        #                         chunk_content = chunk.get('content', '{}')
+        #                         chunk_metadata = chunk.get('metadata', '{}')
                                 
+        #                         # 解析JSON字符串
+        #                         try:
+        #                             if isinstance(chunk_content, str):
+        #                                 content_data = json.loads(chunk_content)
+        #                             else:
+        #                                 content_data = chunk_content
+                                        
+        #                             if isinstance(chunk_metadata, str):
+        #                                 metadata_data = json.loads(chunk_metadata)
+        #                             else:
+        #                                 metadata_data = chunk_metadata
         #                         except json.JSONDecodeError:
-        #                             pass
-        #                         except Exception:
-        #                             pass
+        #                             content_data = {}
+        #                             metadata_data = {}
+                                
+        #                         # ✅ 检查assistant消息的完成状态
+        #                         if chunk_type == 'assistant' and metadata_data.get('stream_status') == 'complete':
+        #                             if content_data.get('content'):
+        #                                 final_response_text = content_data['content']
+        #                                 logger.info(f"🎯 检测到完整assistant回复: {final_response_text[:100]}...")
+                                
+        #                         # ✅ 检查finish状态（类似is_final_response）
+        #                         elif chunk_type == 'status' and content_data.get('status_type') == 'finish':
+        #                             if content_data.get('finish_reason') == 'final':
+        #                                 logger.info(f"🏁 检测到final finish状态")
+        #                                 # 这表示当前回合的最终响应
+                                
+        #                         # ✅ 检查thread_run_end（调用完全结束）
+        #                         elif chunk_type == 'status' and content_data.get('status_type') == 'thread_run_end':
+        #                             logger.info(f"🎯 检测到thread_run_end，ADK调用完全结束")
+        #                             adk_call_completed = True
+                                
+        #                         # ✅ 检查错误状态
+        #                         elif chunk_type == 'status' and chunk.get('status') == 'error':
+        #                             error_detected = True
+        #                             yield chunk
+        #                             continue
+                        
+        #                         # ✅ 检查工具调用和终止条件 (如果还有其他逻辑需要)
+        #                         if chunk_type == 'assistant':
+        #                             # 🔧 从ADK格式中正确提取文本
+        #                             assistant_text = ""
+        #                             if content_data.get('content'):
+        #                                 # 旧格式：{"content": "text"}
+        #                                 assistant_text = str(content_data['content'])
+        #                             elif content_data.get('parts'):
+        #                                 # ADK格式：{"role": "model", "parts": [{"text": "..."}]}
+        #                                 for part in content_data['parts']:
+        #                                     if isinstance(part, dict) and 'text' in part:
+        #                                         # 🔧 修复：安全处理part['text']，防止list类型导致拼接错误
+        #                                         part_text = part['text']
+        #                                         if isinstance(part_text, list):
+        #                                             part_text = ''.join(str(item) for item in part_text)
+        #                                         elif not isinstance(part_text, str):
+        #                                             part_text = str(part_text)
+        #                                         assistant_text += part_text
+                                    
+        #                             if assistant_text:
+        #                                 # 🔧 修复：确保full_response拼接的类型安全
+        #                                 if not isinstance(full_response, str):
+        #                                     full_response = str(full_response)
+        #                                 if not isinstance(assistant_text, str):
+        #                                     assistant_text = str(assistant_text)
+        #                                 full_response += assistant_text
+                                    
+        #                             # 检查XML工具调用
+        #                             if isinstance(assistant_text, str):
+        #                                 if '</ask>' in assistant_text:
+        #                                     last_tool_call = 'ask'
+        #                                     agent_should_terminate = True
+        #                                 elif '</complete>' in assistant_text:
+        #                                     last_tool_call = 'complete' 
+        #                                     agent_should_terminate = True
+        #                                 elif '</web-browser-takeover>' in assistant_text:
+        #                                     last_tool_call = 'web-browser-takeover'
+        #                                     agent_should_terminate = True
 
         #                     yield chunk
                         
-        #                 # ✅ 当async for循环结束时，说明这次ADK调用的事件流已耗尽
-        #                 adk_call_completed = True
-        #                 logger.info(f"🏁 ADK事件流耗尽，单次调用完成")
-                        
+        #                 # ✅ 当async for循环结束时，说明事件流耗尽
+        #                 if not adk_call_completed:
+        #                     adk_call_completed = True
+        #                     logger.info(f"🏁 ADK事件流耗尽，单次调用完成")
+
+                      
         #             else:
         #                 error_detected = True
-
-        #             if error_detected:
-        #                 logger.info(f"🚨 检测到错误，终止执行")
-        #                 if generation:
-        #                     generation.end(output=full_response, status_message="error_detected", level="ERROR")
-        #                 break
-                        
-        #             # ✅ 基于官方建议的外层循环终止判断
-        #             if agent_should_terminate or last_tool_call in ['ask', 'complete', 'web-browser-takeover']:
-        #                 logger.info(f"🛑 Agent明确终止: agent_should_terminate={agent_should_terminate}, last_tool_call={last_tool_call}")
-        #                 if generation:
-        #                     generation.end(output=full_response, status_message="agent_stopped")
-        #                 continue_execution = False
-        #                 logger.info(f"🛑 设置continue_execution=False，应该退出循环")
-        #             elif adk_call_completed and final_response_text:
-        #                 # ✅ ADK调用完成且有最终响应文本，通常表示一轮完整对话结束
-        #                 logger.info(f"✅ ADK调用完成且有最终响应，默认终止外层循环")
-        #                 logger.info(f"📝 最终响应预览: {final_response_text[:200]}...")
-        #                 continue_execution = False
-        #             elif adk_call_completed and not final_response_text:
-        #                 # ✅ ADK调用完成但没有最终响应文本，可能需要继续
-        #                 logger.info(f"⚠️ ADK调用完成但无最终响应文本，继续下一次迭代")
-        #                 # continue_execution保持True，继续下一次迭代
-        #             else:
-        #                 # ✅ 其他情况，可能是ADK内部错误或异常状态
-        #                 logger.info(f"❓ 未明确的ADK状态 (completed={adk_call_completed}, final_text={bool(final_response_text)})，继续尝试")
-
-        #         except Exception as e:
-        #             error_msg = f"Error during response streaming: {str(e)}"
+        #             logger.info(f"123all_chunk: {all_chunk}")    
+        #         except Exception as stream_error:
+        #             error_msg = f"Error during response streaming: {str(stream_error)}"
+        #             logger.error(error_msg)
         #             if generation:
         #                 generation.end(output=full_response, status_message=error_msg, level="ERROR")
         #             yield {
@@ -938,8 +874,9 @@ class AgentRunner:
         #             }
         #             break
                     
-        #     except Exception as e:
-        #         error_msg = f"Error running thread: {str(e)}"
+        #     except Exception as run_error:
+        #         error_msg = f"Error running thread: {str(run_error)}"
+        #         logger.error(error_msg)
         #         yield {
         #             "type": "status",
         #             "status": "error",
@@ -947,14 +884,159 @@ class AgentRunner:
         #         }
         #         break
             
+        #     # ✅ 外层循环终止判断（基于实际事件）
+        #     if error_detected:
+        #         logger.info(f"🚨 检测到错误，终止执行")
+        #         if generation:
+        #             generation.end(output=full_response, status_message="error_detected", level="ERROR")
+        #         break
+                
+        #     # ✅ 基于实际ADK事件的终止判断
+        #     if agent_should_terminate or last_tool_call in ['ask', 'complete', 'web-browser-takeover']:
+        #         logger.info(f"🛑 Agent明确终止: agent_should_terminate={agent_should_terminate}, last_tool_call={last_tool_call}")
+        #         if generation:
+        #             generation.end(output=full_response, status_message="agent_stopped")
+        #         continue_execution = False
+        #         logger.info(f"🛑 设置continue_execution=False，应该退出循环")
+                
+        #     elif adk_call_completed:
+        #         # ✅ ADK调用完成后，继续下一次迭代让Agent执行更多任务
+        #         logger.info(f"✅ ADK调用完成，继续执行更多任务 (iteration {iteration_count}/{self.config.max_iterations})")
+        #         if final_response_text:
+        #             logger.info(f"📝 本轮响应预览: {final_response_text[:200]}...")
+        #         # continue_execution保持True，让Agent继续执行任务
+                
+        #     else:
+        #         # ✅ 其他情况
+        #         logger.info(f"❓ 未明确的ADK状态 (completed={adk_call_completed}, final_text={bool(final_response_text)})，继续尝试")
+            
         #     if generation:
         #         generation.end(output=full_response)
 
         # # 🔍 循环结束日志
         # logger.info(f"🏁 Agent执行循环结束: continue_execution={continue_execution}, iteration_count={iteration_count}")
         # logger.info(f"🏁 最终状态: max_iterations={self.config.max_iterations}")
+        # #                     # ✅ 官方推荐：用is_final_response()获取最终可展示文本
+        # #                     if hasattr(chunk, 'is_final_response') and chunk.is_final_response():
+        # #                         if hasattr(chunk, 'content') and chunk.content and hasattr(chunk.content, 'parts') and chunk.content.parts:
+        # #                             final_response_text = chunk.content.parts[0].text
+        # #                             logger.info(f"🎯 检测到final_response: {final_response_text[:100]}...")
+                            
+        # #                     if isinstance(chunk, dict) and chunk.get('type') == 'status' and chunk.get('status') == 'error':
+        # #                         error_detected = True
+        # #                         yield chunk
+        # #                         continue
+                            
+        # #                     if chunk.get('type') == 'status':
+        # #                         try:
+        # #                             metadata = chunk.get('metadata', {})
+        # #                             if isinstance(metadata, str):
+        # #                                 metadata = json.loads(metadata)
+                                    
+        # #                             if metadata.get('agent_should_terminate'):
+        # #                                 agent_should_terminate = True
+                                        
+        # #                                 content = chunk.get('content', {})
+        # #                                 if isinstance(content, str):
+        # #                                     content = json.loads(content)
+                                        
+        # #                                 if content.get('function_name'):
+        # #                                     last_tool_call = content['function_name']
+        # #                                 elif content.get('xml_tag_name'):
+        # #                                     last_tool_call = content['xml_tag_name']
+                                            
+        # #                         except Exception:
+        # #                             pass
+                            
+        # #                     if chunk.get('type') == 'assistant' and 'content' in chunk:
+        # #                         try:
+        # #                             content = chunk.get('content', '{}')
+        # #                             if isinstance(content, str):
+        # #                                 assistant_content_json = json.loads(content)
+        # #                             else:
+        # #                                 assistant_content_json = content
 
-        asyncio.create_task(asyncio.to_thread(lambda: langfuse.flush()))
+        # #                             assistant_text = assistant_content_json.get('content', '')
+        # #                             full_response += assistant_text
+        # #                             if isinstance(assistant_text, str):
+        # #                                 if '</ask>' in assistant_text or '</complete>' in assistant_text or '</web-browser-takeover>' in assistant_text:
+        # #                                    if '</ask>' in assistant_text:
+        # #                                        xml_tool = 'ask'
+        # #                                    elif '</complete>' in assistant_text:
+        # #                                        xml_tool = 'complete'
+        # #                                    elif '</web-browser-takeover>' in assistant_text:
+        # #                                        xml_tool = 'web-browser-takeover'
+
+        # #                                    last_tool_call = xml_tool
+                                
+        # #                         except json.JSONDecodeError:
+        # #                             pass
+        # #                         except Exception:
+        # #                             pass
+
+        # #                     yield chunk
+                        
+        # #                 # ✅ 当async for循环结束时，说明这次ADK调用的事件流已耗尽
+        # #                 adk_call_completed = True
+        # #                 logger.info(f"🏁 ADK事件流耗尽，单次调用完成")
+                        
+        # #             else:
+        # #                 error_detected = True
+
+        # #             if error_detected:
+        # #                 logger.info(f"🚨 检测到错误，终止执行")
+        # #                 if generation:
+        # #                     generation.end(output=full_response, status_message="error_detected", level="ERROR")
+        # #                 break
+                        
+        # #             # ✅ 基于官方建议的外层循环终止判断
+        # #             if agent_should_terminate or last_tool_call in ['ask', 'complete', 'web-browser-takeover']:
+        # #                 logger.info(f"🛑 Agent明确终止: agent_should_terminate={agent_should_terminate}, last_tool_call={last_tool_call}")
+        # #                 if generation:
+        # #                     generation.end(output=full_response, status_message="agent_stopped")
+        # #                 continue_execution = False
+        # #                 logger.info(f"🛑 设置continue_execution=False，应该退出循环")
+        # #             elif adk_call_completed and final_response_text:
+        # #                 # ✅ ADK调用完成且有最终响应文本，通常表示一轮完整对话结束
+        # #                 logger.info(f"✅ ADK调用完成且有最终响应，默认终止外层循环")
+        # #                 logger.info(f"📝 最终响应预览: {final_response_text[:200]}...")
+        # #                 continue_execution = False
+        # #             elif adk_call_completed and not final_response_text:
+        # #                 # ✅ ADK调用完成但没有最终响应文本，可能需要继续
+        # #                 logger.info(f"⚠️ ADK调用完成但无最终响应文本，继续下一次迭代")
+        # #                 # continue_execution保持True，继续下一次迭代
+        # #             else:
+        # #                 # ✅ 其他情况，可能是ADK内部错误或异常状态
+        # #                 logger.info(f"❓ 未明确的ADK状态 (completed={adk_call_completed}, final_text={bool(final_response_text)})，继续尝试")
+
+        # #         except Exception as e:
+        # #             error_msg = f"Error during response streaming: {str(e)}"
+        # #             if generation:
+        # #                 generation.end(output=full_response, status_message=error_msg, level="ERROR")
+        # #             yield {
+        # #                 "type": "status",
+        # #                 "status": "error",
+        # #                 "message": error_msg
+        # #             }
+        # #             break
+                    
+        # #     except Exception as e:
+        # #         error_msg = f"Error running thread: {str(e)}"
+        # #         yield {
+        # #             "type": "status",
+        # #             "status": "error",
+        # #             "message": error_msg
+        # #         }
+        # #         break
+            
+        # #     if generation:
+        # #         generation.end(output=full_response)
+
+        # # # 🔍 循环结束日志
+        # # logger.info(f"🏁 Agent执行循环结束: continue_execution={continue_execution}, iteration_count={iteration_count}")
+        # # logger.info(f"🏁 最终状态: max_iterations={self.config.max_iterations}")
+
+        # asyncio.create_task(asyncio.to_thread(lambda: langfuse.flush()))
 
 
     # async def run(self) -> AsyncGenerator[Dict[str, Any], None]:

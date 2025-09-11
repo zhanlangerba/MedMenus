@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Dict, Any, Optional, List
 
-from services.supabase import DBConnection
+from services.postgresql import DBConnection
 from utils.logger import logger
 
 

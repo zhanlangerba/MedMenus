@@ -276,6 +276,7 @@ async def run_agent_background(
                 thread_id=thread_id, 
                 project_id=project_id, 
                 stream=stream,
+                native_max_auto_continues=0,  # 允许Agent自动继续执行25轮
                 model_name=effective_model,
                 enable_thinking=enable_thinking, 
                 reasoning_effort=reasoning_effort,
@@ -551,7 +552,6 @@ async def update_agent_run_status(
             elif not isinstance(error, str):
                 error = str(error)
             update_data["error"] = error
-
 
 
         # Retry up to 3 times

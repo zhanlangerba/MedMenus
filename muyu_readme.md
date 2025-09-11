@@ -191,3 +191,92 @@ daytona code
 
 [1]: https://learn.arm.com/learning-paths/cross-platform/daytona/install/?utm_source=chatgpt.com "Install Daytona and run the server"
 [2]: https://github.com/daytonaio/daytona?utm_source=chatgpt.com "Daytona is a Secure and Elastic Infrastructure for Running ..."
+
+
+
+
+
+
+
+# 任务规划：
+
+**是的！你的理解完全正确！** 这就是当前的设计流程。
+
+## 完整的设计流程
+
+### **1. 用户请求进来**
+```
+用户："帮我做一个电商网站"
+```
+
+### **2. 提示词引导LLM判断**
+```python
+# prompt.py 第614-620行
+# **ALWAYS create task lists for:**
+- Research requests (web searches, data gathering)
+- Content creation (reports, documentation, analysis)  
+- Multi-step processes (setup, implementation, testing)
+- Projects requiring planning and execution
+```
+
+### **3. LLM根据提示词生成任务规划**
+LLM分析需求后，构建任务结构：
+```python
+sections = [
+    {
+        "title": "需求分析",
+        "tasks": ["分析功能需求", "设计系统架构", "确定技术栈"]
+    },
+    {
+        "title": "开发阶段", 
+        "tasks": ["搭建环境", "开发前端", "开发后端", "数据库设计"]
+    },
+    {
+        "title": "测试部署",
+        "tasks": ["功能测试", "性能优化", "部署上线"]
+    }
+]
+```
+
+### **4. LLM调用TaskListTool写入数据库**
+```xml
+<function_calls>
+<invoke name="create_tasks">
+<parameter name="sections">[上面的任务规划]</parameter>
+</invoke>
+</function_calls>
+```
+
+### **5. 数据保存到数据库**
+```python
+# task_list_tool.py _save_data()
+await client.table('messages').insert({
+    'thread_id': self.thread_id,
+    'type': 'task_list',          # 特殊类型标识
+    'content': content,           # 任务规划的JSON数据
+    'is_llm_message': False,
+    'metadata': {}
+}).execute()
+```
+
+### **6. 按任务列表执行**
+```python
+# 提示词第747行指导
+# "Before every action, consult your Task List to determine which task to tackle next"
+
+1. view_tasks() → 查看下一个待执行任务
+2. 执行该任务（如调用其他工具）
+3. update_tasks(task_ids=["xxx"], status="completed") → 标记完成
+4. 重复直到所有任务完成
+```
+
+## 核心机制
+
+**你理解得非常准确**：
+- ✅ **提示词引导** → LLM判断何时需要任务规划
+- ✅ **LLM生成规划** → 根据用户需求智能规划任务
+- ✅ **调用TaskListTool** → 通过create_tasks()保存规划
+- ✅ **写入数据库** → messages表，type="task_list"
+- ✅ **执行管理** → 通过view_tasks、update_tasks管理执行过程
+
+**这确实是一个"提示词驱动的智能任务规划与执行管理系统"！**

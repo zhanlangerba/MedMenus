@@ -283,12 +283,14 @@ class ResponseProcessor:
 
         # 运行状态初始化 
         continuous_state = continuous_state or {}   # 保存跨轮次的状态信息
-        accumulated_content = continuous_state.get('accumulated_content', "") # 累积的内容，在下一轮中作为上下文
+        # 🔧 修复：accumulated_content只包含当前轮次的内容，避免重复累积历史内容
+        accumulated_content = ""  # 每轮从空开始累积内容
         # 确保 accumulated_content 始终是字符串
         if not isinstance(accumulated_content, str):
             accumulated_content = str(accumulated_content)
         tool_calls_buffer = {} # 工具调用缓冲区
-        current_xml_content = accumulated_content   # 累积内容如果自动继续，否则为空
+        # 🔧 修复：current_xml_content每轮从空开始，用于XML工具解析
+        current_xml_content = ""  # 每轮从空开始累积XML内容
         # 🔧 确保 current_xml_content 也是字符串类型
         if not isinstance(current_xml_content, str):
             logger.warning(f"⚠️ current_xml_content 初始化类型异常: {type(current_xml_content)}, 重置为空字符串")
@@ -504,8 +506,8 @@ class ResponseProcessor:
                                 current_xml_content += chunk_content  # 用于XML工具调用检测
     
 
-                                logger.info(f"accumulated_content: {accumulated_content}")
-                                logger.info(f"current_xml_content: {current_xml_content}")  
+                                # logger.info(f"accumulated_content: {accumulated_content}")
+                                # logger.info(f"current_xml_content: {current_xml_content}")  
 
                                 # 防止模型无限循环调用工具，如果 没有达到工具调用上限，则继续输出内容
                                 # config.max_xml_tool_calls:最多允许1次XML工具调用
@@ -705,6 +707,10 @@ class ResponseProcessor:
                                                 output=raw_response.get('message', str(raw_response))
                                             )
                                             logger.info(f"tool result adapted: success={adapted_result.success}, output='{adapted_result.output}'")
+                                        elif isinstance(raw_response, dict) and 'result' in raw_response:
+                                            # 处理 {'result': ToolResult(...)} 格式
+                                            adapted_result = raw_response['result']
+                                            logger.info(f"tool result extracted from dict: success={adapted_result.success if hasattr(adapted_result, 'success') else 'unknown'}")
                                         else:
                                             # 其他格式保持原样
                                             adapted_result = raw_response
@@ -821,7 +827,7 @@ class ResponseProcessor:
                     "role": "assistant", 
                     "content": accumulated_content, 
                     "tool_calls": complete_native_tool_calls or None
-                }
+                    }
 
                 # 存储 assistant 消息到数据库中
                 last_assistant_message_object = await self._add_message_with_agent_info(
@@ -873,17 +879,17 @@ class ResponseProcessor:
                             tool_completion["thread_id"], context.tool_call, context.result, config.xml_adding_strategy,
                             context.assistant_message_id, context.parsing_details
                         )
-                        
+
                         # 然后创建链接到工具结果的完成状态
                         completed_msg_obj = await self._yield_and_save_tool_completed(
-                            context, 
+                            context,
                             str(saved_tool_result_object['message_id']) if saved_tool_result_object else None, 
                             tool_completion["thread_id"], tool_completion["thread_run_id"]
                         )
                         
                         if completed_msg_obj:
                             yield format_for_yield(completed_msg_obj)
-                            
+
                         if saved_tool_result_object:
                             yield format_for_yield(saved_tool_result_object)
                             logger.info(f"tool_completed_buffer: processed tool_id={tool_completion['tool_call_id']}")
@@ -1038,9 +1044,9 @@ class ResponseProcessor:
         finally:
             # Update continuous state or close run
             if should_auto_continue:
-                continuous_state['accumulated_content'] = accumulated_content
+                # 🔧 修复：不再保存accumulated_content到continuous_state，避免重复累积
                 continuous_state['sequence'] = __sequence
-                logger.info(f"Updated continuous state for auto-continue with {len(accumulated_content)} chars")
+                logger.info(f"Auto-continue prepared (sequence: {__sequence}), but not saving accumulated_content to avoid duplication")
             else:
                 try:
                     end_msg_obj = await self.add_message(
@@ -1058,7 +1064,7 @@ class ResponseProcessor:
                         status_message=f"Error in finally block: {str(final_e)}"
                     )
 
-  
+
     async def process_non_streaming_response(
         self,
         llm_response: Any,
@@ -1646,30 +1652,27 @@ class ResponseProcessor:
                 function_name = tool_call.get("function_name", "")
                 
                 # Format the tool result content - tool role needs string content
+                # 🔧 修改：将工具输出包装为前端期望的格式
                 if isinstance(result, str):
-                    content = result
+                    raw_output = result
                 elif hasattr(result, 'output'):
-                    # If it's a ToolResult object
-                    if isinstance(result.output, dict) or isinstance(result.output, list):
-                        # If output is already a dict or list, convert to JSON string
-                        content = json.dumps(result.output)
-                    else:
-                        # Otherwise just use the string representation
-                        content = str(result.output)
+                    raw_output = result.output
                 else:
-                    # Fallback to string representation of the whole result
-                    content = str(result)
+                    raw_output = str(result)
+                
+                # 包装为前端期望的格式：包含tool_name的结构
+                wrapped_content = {
+                    "tool_name": function_name,
+                    "result": raw_output
+                }
+                content = json.dumps(wrapped_content)
                 
                 logger.info(f"Formatted tool result content: {content[:100]}...")
                 self.trace.event(name="formatted_tool_result_content", level="DEFAULT", status_message=(f"Formatted tool result content: {content[:100]}..."))
                 
-                # Create the tool response message with proper format
-                tool_message = {
-                    "role": "tool",
-                    "tool_call_id": tool_call["id"],
-                    "name": function_name,
-                    "content": content
-                }
+                # Add tool_call_id and function name to metadata for proper linking
+                metadata["tool_call_id"] = tool_call["id"]
+                metadata["tool_name"] = function_name
                 
                 logger.info(f"Adding native tool result for tool_call_id={tool_call['id']} with role=tool")
                 self.trace.event(name="adding_native_tool_result_for_tool_call_id", level="DEFAULT", status_message=(f"Adding native tool result for tool_call_id={tool_call['id']} with role=tool"))
@@ -1677,12 +1680,12 @@ class ResponseProcessor:
                 # Add as a tool message to the conversation history
                 # This makes the result visible to the LLM in the next turn
                 logger.info(f"thread_id: {thread_id}")
-                logger.info(f"tool_message: {tool_message}")
+                logger.info(f"tool_content: {content}")
                 logger.info(f"metadata: {metadata}")
                 message_obj = await self.add_message(
                     thread_id=thread_id,
                     type="tool",  # Special type for tool responses
-                    content=tool_message,
+                    content=content,  # 直接使用工具输出，不包装在tool_message中
                     is_llm_message=True,
                     metadata=metadata
                 )

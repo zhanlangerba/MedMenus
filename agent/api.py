@@ -1738,130 +1738,115 @@ async def get_agents(
     client = await db.client
     
     try:
-        # Calculate offset
+        # 计算偏移量
         offset = (page - 1) * limit
-        
-        # Query user_states table for agents data
-        # In Google ADK architecture, agents are stored in user_states.state JSONB field
-        user_states_result = await client.table('user_states').select('*').eq("user_id", user_id).execute()
-        
-        # Extract agents from user state
-        all_agents = []
-        if user_states_result.data:
-            for state_row in user_states_result.data:
-                if state_row.get('state') and isinstance(state_row['state'], dict):
-                    agents_data = state_row['state'].get('agents', [])
-                    if isinstance(agents_data, list):
-                        all_agents.extend(agents_data)
-                    elif isinstance(agents_data, dict):
-                        # If agents is a dict, convert to list
-                        all_agents.extend(agents_data.values())
-        
-        # If no user agents found, check app_states for default agents
-        if not all_agents:
-            app_states_result = await client.table('app_states').select('*').execute()
-            for state_row in app_states_result.data:
-                if state_row.get('state') and isinstance(state_row['state'], dict):
-                    default_agents = state_row['state'].get('default_agents', [])
-                    if isinstance(default_agents, list):
-                        # Mark these as default agents available to this user
-                        for agent in default_agents:
-                            agent['is_default'] = True
-                            agent['user_id'] = user_id  # Make them available to this user
-                        all_agents.extend(default_agents)
-        
-        # Convert agents to expected format and add required fields
-        agents_data = []
-        for i, agent in enumerate(all_agents):
-            if not isinstance(agent, dict):
-                continue
-            
-            # Ensure required fields exist
-            agent_record = {
-                'agent_id': agent.get('agent_id', f"agent_{i}"),
-                'account_id': agent.get('user_id', user_id),
-                'name': agent.get('name', f'Agent {i+1}'),
-                'description': agent.get('description', ''),
-                'system_prompt': agent.get('system_prompt', ''),
-                'configured_mcps': agent.get('configured_mcps', []),
-                'custom_mcps': agent.get('custom_mcps', []),
-                'agentpress_tools': agent.get('agentpress_tools', {}),
-                'is_default': agent.get('is_default', False),
-                'is_public': agent.get('is_public', False),
-                'tags': agent.get('tags', []),
-                'avatar': agent.get('avatar'),
-                'avatar_color': agent.get('avatar_color'),
-                'profile_image_url': agent.get('profile_image_url'),
-                'created_at': agent.get('created_at', '2024-01-01T00:00:00Z'),
-                'updated_at': agent.get('updated_at', '2024-01-01T00:00:00Z'),
-                'current_version_id': agent.get('current_version_id'),
-                'version_count': agent.get('version_count', 1),
-                'metadata': agent.get('metadata', {})
-            }
-            agents_data.append(agent_record)
-        
-        # Apply search filter
+        # 构建基础查询：选择 agents 表的所有字段 (*)
+        # 启用精确计数 (count='exact') 用于分页
+        # 过滤条件：只查询当前用户的 agents
+        query = client.table('agents').select('*', count='exact').eq("user_id", user_id)
+
+        # 如果提供搜索词，在 name 和 description 字段中模糊搜索
         if search:
-            search_term = search.lower()
-            agents_data = [
-                agent for agent in agents_data 
-                if search_term in agent.get('name', '').lower() or 
-                   search_term in agent.get('description', '').lower()
-            ]
+            search_term = f"%{search}%"  # 模糊匹配模式
+            query = query.or_(f"name.ilike.{search_term},description.ilike.{search_term}")
         
-        # Apply filters
+        # 过滤条件：是否为默认 Agent，只有明确传入 True/False 时才应用此过滤
         if has_default is not None:
-            agents_data = [agent for agent in agents_data if agent.get('is_default') == has_default]
+            query = query.eq("is_default", has_default)
         
-        # Store original count before tool filtering
-        total_count = len(agents_data)
-        
-        # In Google ADK architecture, version data is embedded in agent data
-        # No separate agent_versions table needed
-        agent_version_map = {}
-        for agent in agents_data:
-            agent_id = agent.get('agent_id')
-            if agent_id:
-                # Create version data from agent data itself
-                version_dict = {
-                    'version_id': agent.get('current_version_id', f"{agent_id}_v1"),
-                    'agent_id': agent_id,
-                    'version_number': agent.get('version_count', 1),
-                    'version_name': f"v{agent.get('version_count', 1)}",
-                    'system_prompt': agent.get('system_prompt', ''),
-                    'configured_mcps': agent.get('configured_mcps', []),
-                    'custom_mcps': agent.get('custom_mcps', []),
-                    'agentpress_tools': agent.get('agentpress_tools', {}),
-                    'is_active': True,
-                    'created_at': agent.get('created_at'),
-                    'updated_at': agent.get('updated_at'),
-                    'created_by': agent.get('user_id'),
+                
+        # 支持按 name、updated_at、created_at 排序
+        # 支持升序(asc)和降序(desc)
+        # 默认按创建时间降序排列（最新的在前）
+        if sort_by == "name":
+            query = query.order("name", desc=(sort_order == "desc"))
+        elif sort_by == "updated_at":
+            query = query.order("updated_at", desc=(sort_order == "desc"))
+        elif sort_by == "created_at":
+            query = query.order("created_at", desc=(sort_order == "desc"))
+        else:
+            # 默认按创建时间排序
+            query = query.order("created_at", desc=(sort_order == "desc"))
+
+        # 获取分页数据和总数量
+        query = query.range(offset, offset + limit - 1)
+        agents_result = await query.execute()
+        total_count = agents_result.count if agents_result.count is not None else 0
+
+        if not agents_result.data:
+            logger.info(f"No agents found for user: {user_id}")
+            return {
+                "agents": [],
+                "pagination": {
+                    "page": page,
+                    "limit": limit,
+                    "total": 0,
+                    "pages": 0
                 }
-                agent_version_map[agent_id] = version_dict
+            }
         
-        # Apply tool-based filters using embedded data
+        # 后处理：工具过滤和tools_count排序
+        agents_data = agents_result.data
+        
+        # 首先，批量获取所有Agent的版本数据，确保我们拥有正确的工具信息
+        # 这样做比逐个Agent调用服务更高效
+        agent_version_map = {}
+        version_ids = list({agent['current_version_id'] for agent in agents_data if agent.get('current_version_id')})
+        logger.info(f"version_ids: {version_ids}")
+        if version_ids:
+            try:
+                versions_result = await client.table('agent_versions').select(
+                    'version_id, agent_id, version_number, version_name, is_active, created_at, updated_at, created_by, config'
+                ).in_('version_id', version_ids).execute()
+
+                for row in (versions_result.data or []):
+                    config = row.get('config') or {}
+                    tools = config.get('tools') or {}
+                version_dict = {
+                        'version_id': row['version_id'],
+                        'agent_id': row['agent_id'],
+                        'version_number': row['version_number'],
+                        'version_name': row['version_name'],
+                        'system_prompt': config.get('system_prompt', ''),
+                        'configured_mcps': tools.get('mcp', []),
+                        'custom_mcps': tools.get('custom_mcp', []),
+                        'agentpress_tools': tools.get('agentpress', {}),
+                        'is_active': row.get('is_active', False),
+                        'created_at': row.get('created_at'),
+                        'updated_at': row.get('updated_at') or row.get('created_at'),
+                        'created_by': row.get('created_by'),
+                }
+                agent_version_map[row['agent_id']] = version_dict
+            except Exception as e:
+                logger.warning(f"Failed to batch load versions for agents: {e}")
+        
+        # 应用工具过滤条件使用版本数据
         if has_mcp_tools is not None or has_agentpress_tools is not None or tools:
             filtered_agents = []
             tools_filter = []
             if tools:
-                # Handle case where tools might be passed as dict instead of string
+                # 处理tools参数可能作为dict而不是字符串传递的情况
                 if isinstance(tools, str):
                     tools_filter = [tool.strip() for tool in tools.split(',') if tool.strip()]
                 elif isinstance(tools, dict):
-                    # If tools is a dict, log the issue and skip filtering
+                    # 如果tools是dict，记录问题并跳过过滤
                     logger.warning(f"Received tools parameter as dict instead of string: {tools}")
                     tools_filter = []
                 elif isinstance(tools, list):
-                    # If tools is a list, use it directly
+                    # 如果tools是list，直接使用
                     tools_filter = [str(tool).strip() for tool in tools if str(tool).strip()]
                 else:
                     logger.warning(f"Unexpected tools parameter type: {type(tools)}, value: {tools}")
                     tools_filter = []
             
             for agent in agents_data:
-                # Use agent data directly (no need for extract_agent_config)
-                configured_mcps = agent.get('configured_mcps', [])
-                agentpress_tools = agent.get('agentpress_tools', {})
+                # Get version data if available and extract configuration
+                version_data = agent_version_map.get(agent['agent_id'])
+                from agent.config_helper import extract_agent_config
+                agent_config = extract_agent_config(agent, version_data)
+                
+                configured_mcps = agent_config['configured_mcps']
+                agentpress_tools = agent_config['agentpress_tools']
                 
                 # Check MCP tools filter
                 if has_mcp_tools is not None:
@@ -1899,17 +1884,19 @@ async def get_agents(
             
             agents_data = filtered_agents
         
-        # Apply sorting
-        if sort_by == "name":
-            agents_data.sort(key=lambda x: x.get('name', '').lower(), reverse=(sort_order == "desc"))
-        elif sort_by == "updated_at":
-            agents_data.sort(key=lambda x: x.get('updated_at', ''), reverse=(sort_order == "desc"))
-        elif sort_by == "created_at":
-            agents_data.sort(key=lambda x: x.get('created_at', ''), reverse=(sort_order == "desc"))
-        elif sort_by == "tools_count":
+        # 处理tools_count排序 (后处理 required)
+        if sort_by == "tools_count":
             def get_tools_count(agent):
-                configured_mcps = agent.get('configured_mcps', [])
-                agentpress_tools = agent.get('agentpress_tools', {})
+                # 获取版本数据如果available
+                version_data = agent_version_map.get(agent['agent_id'])
+                
+                # 使用版本数据用于工具如果available, 否则回退到Agent数据
+                if version_data:
+                    configured_mcps = version_data.get('configured_mcps', [])
+                    agentpress_tools = version_data.get('agentpress_tools', {})
+                else:
+                    configured_mcps = agent.get('configured_mcps', [])
+                    agentpress_tools = agent.get('agentpress_tools', {})
                 
                 mcp_count = len(configured_mcps)
                 agentpress_count = sum(
@@ -1919,19 +1906,17 @@ async def get_agents(
                 return mcp_count + agentpress_count
             
             agents_data.sort(key=get_tools_count, reverse=(sort_order == "desc"))
-        else:
-            # Default to created_at
-            agents_data.sort(key=lambda x: x.get('created_at', ''), reverse=(sort_order == "desc"))
         
-        # Update total count and apply pagination
-        total_count = len(agents_data)
-        agents_data = agents_data[offset:offset + limit]
+        # 应用分页到过滤结果如果我们做了后处理
+        if has_mcp_tools is not None or has_agentpress_tools is not None or tools or sort_by == "tools_count":
+            total_count = len(agents_data)
+            agents_data = agents_data[offset:offset + limit]
         
-        # Format the response
+        # 格式化响应
         agent_list = []
         for agent in agents_data:
             current_version = None
-            # Use version data from agent_version_map
+            # 使用已经获取的版本数据 from agent_version_map
             version_dict = agent_version_map.get(agent['agent_id'])
             if version_dict:
                 try:
@@ -1946,35 +1931,43 @@ async def get_agents(
                         custom_mcps=version_dict.get('custom_mcps', []),
                         agentpress_tools=version_dict.get('agentpress_tools', {}),
                         is_active=version_dict.get('is_active', True),
-                        created_at=version_dict.get('created_at', '2024-01-01T00:00:00Z'),
-                        updated_at=version_dict.get('updated_at', '2024-01-01T00:00:00Z'),
+                        created_at=version_dict['created_at'],
+                        updated_at=version_dict.get('updated_at', version_dict['created_at']),
                         created_by=version_dict.get('created_by')
                     )
                 except Exception as e:
-                    logger.warning(f"Failed to create version response for agent {agent['agent_id']}: {e}")
+                    logger.warning(f"Failed to get version data for agent {agent['agent_id']}: {e}")
             
-            # Use agent data directly (no need for extract_agent_config)
+            # 提取配置使用统一配置 approach
+            from agent.config_helper import extract_agent_config
+            agent_config = extract_agent_config(agent, version_dict)
+            
+            system_prompt = agent_config['system_prompt']
+            configured_mcps = agent_config['configured_mcps']
+            custom_mcps = agent_config['custom_mcps']
+            agentpress_tools = agent_config['agentpress_tools']
+            
             agent_list.append(AgentResponse(
                 agent_id=agent['agent_id'],
                 account_id=agent['user_id'],
                 name=agent['name'],
                 description=agent.get('description'),
-                system_prompt=agent.get('system_prompt', ''),
-                configured_mcps=agent.get('configured_mcps', []),
-                custom_mcps=agent.get('custom_mcps', []),
-                agentpress_tools=agent.get('agentpress_tools', {}),
+                system_prompt=system_prompt,
+                configured_mcps=configured_mcps,
+                custom_mcps=custom_mcps,
+                agentpress_tools=agentpress_tools,
                 is_default=agent.get('is_default', False),
                 is_public=agent.get('is_public', False),
                 tags=agent.get('tags', []),
-                avatar=agent.get('avatar'),
-                avatar_color=agent.get('avatar_color'),
-                profile_image_url=agent.get('profile_image_url'),
-                created_at=agent['created_at'].isoformat() if agent['created_at'] else None,
+                avatar=agent_config.get('avatar'),
+                avatar_color=agent_config.get('avatar_color'),
+                profile_image_url=agent_config.get('profile_image_url'),
+                created_at=agent['created_at'].isoformat() if agent.get('created_at') else None,
                 updated_at=agent['updated_at'].isoformat() if agent.get('updated_at') else None,
                 current_version_id=agent.get('current_version_id'),
                 version_count=agent.get('version_count', 1),
                 current_version=current_version,
-                metadata=json.loads(agent.get('metadata', '{}')) if isinstance(agent.get('metadata'), str) else agent.get('metadata', {})
+                metadata=json.loads(agent.get('metadata', '{}')) if isinstance(agent.get('metadata'), str) else (agent.get('metadata') or {})
             ))
         
         total_pages = (total_count + limit - 1) // limit
@@ -2016,7 +2009,7 @@ async def get_agent(agent_id: str, user_id: str = Depends(get_current_user_id_fr
         agent_data = agent_result.data[0]
         
         # Check ownership - only owner can access non-public agents
-        if agent_data['account_id'] != user_id and not agent_data.get('is_public', False):
+        if agent_data['user_id'] != user_id and not agent_data.get('is_public', False):
             raise HTTPException(status_code=403, detail="Access denied")
         
         # Use versioning system to get current version data
@@ -2082,7 +2075,7 @@ async def get_agent(agent_id: str, user_id: str = Depends(get_current_user_id_fr
         
         return AgentResponse(
             agent_id=agent_data['agent_id'],
-            account_id=agent_data['account_id'],
+            account_id=agent_data['user_id'],
             name=agent_data['name'],
             description=agent_data.get('description'),
             system_prompt=system_prompt,
@@ -2095,12 +2088,12 @@ async def get_agent(agent_id: str, user_id: str = Depends(get_current_user_id_fr
             avatar=agent_config.get('avatar'),
             avatar_color=agent_config.get('avatar_color'),
             profile_image_url=agent_config.get('profile_image_url'),
-            created_at=agent_data['created_at'],
-            updated_at=agent_data.get('updated_at', agent_data['created_at']),
+            created_at=agent_data['created_at'].isoformat() if agent_data.get('created_at') else None,
+            updated_at=agent_data.get('updated_at', agent_data['created_at']).isoformat() if agent_data.get('updated_at', agent_data['created_at']) else None,
             current_version_id=agent_data.get('current_version_id'),
             version_count=agent_data.get('version_count', 1),
             current_version=current_version,
-            metadata=agent_data.get('metadata')
+            metadata=json.loads(agent_data.get('metadata', '{}')) if isinstance(agent_data.get('metadata'), str) else (agent_data.get('metadata') or {})
         )
         
     except HTTPException:
