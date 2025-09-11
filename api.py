@@ -76,9 +76,7 @@ async def lifespan(app: FastAPI):
         # asyncio.create_task(agent_api.restore_running_agent_runs())
 
         sandbox_api.initialize(db)
-        
-        
-        # triggers_api.initialize(db)
+        triggers_api.initialize(db)  # 🔧 修复：初始化triggers数据库连接
         # pipedream_api.initialize(db)
         # credentials_api.initialize(db)
         # template_api.initialize(db)

@@ -56,7 +56,7 @@ class AgentConfig:
     thread_id: str
     project_id: str
     stream: bool
-    native_max_auto_continues: int = 25
+    native_max_auto_continues: int = 0
     max_iterations: int = 100
     model_name: str = "deepseek/deepseek-chat"
     enable_thinking: Optional[bool] = False

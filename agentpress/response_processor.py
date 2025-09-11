@@ -502,6 +502,7 @@ class ResponseProcessor:
                                     current_xml_content = ""
 
                                 # 更新累积内容和XML内容
+                                logger.info(f"current chunk_content: {chunk_content}")
                                 accumulated_content += chunk_content
                                 current_xml_content += chunk_content  # 用于XML工具调用检测
     
