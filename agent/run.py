@@ -79,8 +79,8 @@ class ToolManager:
         from agent.tools.simple_test_tool import SimpleTestTool
         self.thread_manager.add_tool(SimpleTestTool)
 
-        from agent.tools.task_list_tool_simple import TaskListToolSimple
-        self.thread_manager.add_tool(TaskListToolSimple, project_id=self.project_id, thread_manager=self.thread_manager, thread_id=self.thread_id)
+        from agent.tools.task_list_tool import TaskListTool
+        self.thread_manager.add_tool(TaskListTool, project_id=self.project_id, thread_manager=self.thread_manager, thread_id=self.thread_id)
         logger.info("Successfully registered task list tool: TaskListTool (with enhanced registry)")
         
         # self.thread_manager.add_tool(SandboxShellTool, project_id=self.project_id, thread_manager=self.thread_manager)
@@ -695,17 +695,18 @@ class AgentRunner:
 
                                     assistant_text = assistant_content_json.get('content', '')
                                     full_response += assistant_text
+                                    
                                     if isinstance(assistant_text, str):
                                         if '</ask>' in assistant_text or '</complete>' in assistant_text or '</web-browser-takeover>' in assistant_text:
                                             if '</ask>' in assistant_text:
-                                                xml_tool = 'ask'
+                                                            xml_tool = 'ask'
                                             elif '</complete>' in assistant_text:
-                                                xml_tool = 'complete'
+                                                            xml_tool = 'complete'
                                             elif '</web-browser-takeover>' in assistant_text:
-                                                xml_tool = 'web-browser-takeover'
+                                                            xml_tool = 'web-browser-takeover'
 
                                             last_tool_call = xml_tool
-                                
+                                    
                                 except json.JSONDecodeError:
                                     pass
                                 except Exception:

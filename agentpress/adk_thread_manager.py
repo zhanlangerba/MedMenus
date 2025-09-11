@@ -522,6 +522,29 @@ class ADKThreadManager:
                         if hasattr(response_gen, '__aiter__'):
                             from typing import AsyncGenerator, cast
                             async for chunk in cast(AsyncGenerator, response_gen):
+                                
+                                # 🔧 添加：检测工具执行完成，立即终止
+                                if chunk.get('type') == 'status':
+                                    try:
+                                        content = json.loads(chunk.get('content', '{}'))
+                                        status_type = content.get('status_type')
+                                        
+                                        # 检测到工具完成，立即终止整个流程
+                                        if status_type == 'tool_completed':
+                                            logger.info("🔧 检测到工具执行完成，立即终止流程")
+                                            yield chunk  # 先输出工具完成状态
+                                            return  # 🔧 彻底终止，不再处理任何后续内容
+                                            
+                                        # 其他status处理逻辑
+                                        if content.get('finish_reason') == 'length':
+                                            logger.info(f"Detected finish_reason='length', auto-continuing ({auto_continue_count + 1}/{native_max_auto_continues})")
+                                            auto_continue = True
+                                            auto_continue_count += 1
+                                            continue
+                                    except (json.JSONDecodeError, TypeError):
+                                        # If content is not valid JSON, just yield the chunk normally
+                                        pass
+                                
                                 # Check if this is a finish reason chunk with tool_calls or xml_tool_limit_reached
                                 if chunk.get('type') == 'finish':
                                     if chunk.get('finish_reason') == 'tool_calls':
@@ -538,18 +561,6 @@ class ADKThreadManager:
                                         auto_continue = False
                                         # Still yield the chunk to inform the client
 
-                                elif chunk.get('type') == 'status':
-                                    # if the finish reason is length, auto-continue
-                                    try:
-                                        content = json.loads(chunk.get('content', '{}'))
-                                        if content.get('finish_reason') == 'length':
-                                            logger.info(f"Detected finish_reason='length', auto-continuing ({auto_continue_count + 1}/{native_max_auto_continues})")
-                                            auto_continue = True
-                                            auto_continue_count += 1
-                                            continue
-                                    except (json.JSONDecodeError, TypeError):
-                                        # If content is not valid JSON, just yield the chunk normally
-                                        pass
                                 # Otherwise just yield the chunk normally
                                 yield chunk
                         else:

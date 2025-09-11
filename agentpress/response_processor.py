@@ -502,7 +502,8 @@ class ResponseProcessor:
                                     current_xml_content = ""
 
                                 # 更新累积内容和XML内容
-                                logger.info(f"current chunk_content: {chunk_content}")
+                                
+                                logger.info(f"current chunk_content: {accumulated_content}")
                                 accumulated_content += chunk_content
                                 current_xml_content += chunk_content  # 用于XML工具调用检测
     
@@ -681,7 +682,7 @@ class ResponseProcessor:
                                             "context": context
                                         })
                                         tool_index += 1  # 只有在成功添加新工具时才递增
-                                        logger.info(f"pending_tool_executions: {pending_tool_executions}")
+                                        # logger.info(f"pending_tool_executions: {pending_tool_executions}")
 
                                 
                                 # 处理工具响应

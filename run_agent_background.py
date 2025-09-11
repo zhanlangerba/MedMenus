@@ -276,7 +276,7 @@ async def run_agent_background(
                 thread_id=thread_id, 
                 project_id=project_id, 
                 stream=stream,
-                native_max_auto_continues=0,  # 允许Agent自动继续执行25轮
+                native_max_auto_continues=0,  # 🔧 修复：完全禁用自动继续
                 model_name=effective_model,
                 enable_thinking=enable_thinking, 
                 reasoning_effort=reasoning_effort,
