@@ -328,14 +328,14 @@ class ResponseProcessor:
         # native_tool_calling (默认: False)：启用OpenAI原生格式的函数调用。格式如 {"name": "function_name", "args": {"arg1": "value1", "arg2": "value2"}}
         # execute_on_stream (默认: False)：是否在流式响应中执行工具调用
         # tool_execution_strategy (默认: "sequential")：工具调用执行策略，"sequential" 或 "parallel"
-        logger.info(f"Streaming Config: XML={config.xml_tool_calling}, Native={config.native_tool_calling}, "
-            f"Execute on stream={config.execute_on_stream}, Strategy={config.tool_execution_strategy}")
+        # logger.info(f"Streaming Config: XML={config.xml_tool_calling}, Native={config.native_tool_calling}, "
+        #     f"Execute on stream={config.execute_on_stream}, Strategy={config.tool_execution_strategy}")
 
         # 重用 / 创建 thread_run_id：保持相同的运行ID
         thread_run_id = continuous_state.get('thread_run_id') or str(uuid.uuid4())
         continuous_state['thread_run_id'] = thread_run_id
         
-        logger.info(f"Processing ADK streaming response with thread_run_id: {thread_run_id}")
+        # logger.info(f"Processing ADK streaming response with thread_run_id: {thread_run_id}")
 
 
         try:
@@ -408,7 +408,7 @@ class ResponseProcessor:
 
             # 这里开始流式处理异步的Runner
             async for event in adk_response:
-                logger.info(f"Current Event：{event}")
+                # logger.info(f"Current Event：{event}")
                 # 如果first_chunk_time为空，则设置为当前时间
                 if streaming_metadata["first_chunk_time"] is None:
                     streaming_metadata["first_chunk_time"] = _now_ts()  # 获取当前时间戳

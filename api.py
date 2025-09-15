@@ -1,7 +1,7 @@
 from dotenv import load_dotenv # type: ignore
 load_dotenv()
 
-# Set logging level for development
+# 设置日志级别
 import os
 if not os.getenv("LOGGING_LEVEL"):
     os.environ["LOGGING_LEVEL"] = "INFO"
@@ -45,10 +45,6 @@ if sys.platform == "win32":
 # 初始化管理器
 db = DBConnection()
 instance_id = "single"
-
-# Rate limiter state
-ip_tracker = OrderedDict()
-MAX_CONCURRENT_IPS = 25
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):

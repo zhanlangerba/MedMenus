@@ -658,30 +658,124 @@ class AgentRunner:
 
                 try:
                     if hasattr(response, '__aiter__') and not isinstance(response, dict):
+                        all_chunk = []
+                        index = 0
+                        tool_call_assistant_map: Dict[str, str] = {}
                         async for chunk in response:
+                            # 拆分包含多个 tool_calls 的最终 assistant 消息，并建立 tool_call_id → assistant_message_id 的映射
+                            try:
+                                if isinstance(chunk, dict) and chunk.get('type') == 'assistant':
+                                    metadata_obj = chunk.get('metadata', {})
+                                    if isinstance(metadata_obj, str):
+                                        try:
+                                            metadata_obj = json.loads(metadata_obj)
+                                        except Exception:
+                                            metadata_obj = {}
+                                    stream_status = metadata_obj.get('stream_status')
+                                    if stream_status == 'complete':
+                                        content_obj = chunk.get('content', '{}')
+                                        if isinstance(content_obj, str):
+                                            try:
+                                                content_obj = json.loads(content_obj)
+                                            except Exception:
+                                                content_obj = {}
+                                        tool_calls = content_obj.get('tool_calls') or []
+                                        if isinstance(tool_calls, list) and len(tool_calls) > 0:
+                                            from uuid import uuid4
+                                            assistant_text = content_obj.get('content', '')
+                                            from datetime import datetime, timezone, timedelta
+                                            base_ts_str = chunk.get('created_at')
+                                            try:
+                                                base_dt = datetime.fromisoformat(base_ts_str) if isinstance(base_ts_str, str) else datetime.now(timezone.utc)
+                                            except Exception:
+                                                base_dt = datetime.now(timezone.utc)
+                                            for i, tc in enumerate(tool_calls):
+                                                new_assistant_id = str(uuid4())
+                                                new_content = {
+                                                    "role": "assistant",
+                                                    "content": assistant_text if i == 0 else "",
+                                                    "tool_calls": [tc]
+                                                }
+                                                new_chunk = dict(chunk)
+                                                new_chunk['message_id'] = new_assistant_id
+                                                new_chunk['content'] = json.dumps(new_content)
+                                                # 设置严格递增的 created_at，避免前端 key 抖动
+                                                try:
+                                                    new_dt = base_dt + timedelta(milliseconds=i)
+                                                    new_chunk['created_at'] = new_dt.isoformat()
+                                                except Exception:
+                                                    pass
+                                                # 为每页提供稳定顺序号
+                                                try:
+                                                    metadata_copy = dict(metadata_obj) if isinstance(metadata_obj, dict) else {}
+                                                    metadata_copy['tool_index'] = i
+                                                    new_chunk['metadata'] = json.dumps(metadata_copy)
+                                                except Exception:
+                                                    pass
+                                                # 记录映射，供后续 tool 结果重写assistant_message_id
+                                                try:
+                                                    tool_call_id = tc.get('id') if isinstance(tc, dict) else None
+                                                    if tool_call_id:
+                                                        tool_call_assistant_map[tool_call_id] = new_assistant_id
+                                                except Exception:
+                                                    pass
+                                                all_chunk.append({"index": index, "chunk": new_chunk})
+                                                index += 1
+                                                yield new_chunk
+                                            # 不再下发原始的合并assistant，直接进入下一条chunk
+                                            continue
+                            except Exception:
+                                pass
+
+                            # 重写每个工具结果的 assistant_message_id，指向对应拆分后的 assistant 消息
+                            try:
+                                if isinstance(chunk, dict) and chunk.get('type') == 'tool':
+                                    metadata_obj = chunk.get('metadata', {})
+                                    if isinstance(metadata_obj, str):
+                                        try:
+                                            metadata_obj = json.loads(metadata_obj)
+                                        except Exception:
+                                            metadata_obj = {}
+                                    tool_call_id = metadata_obj.get('tool_call_id') or metadata_obj.get('tool_call')
+                                    mapped_assistant_id = tool_call_assistant_map.get(str(tool_call_id)) if tool_call_id else None
+                                    if mapped_assistant_id:
+                                        metadata_obj['assistant_message_id'] = mapped_assistant_id
+                                        chunk['metadata'] = json.dumps(metadata_obj)
+                            except Exception:
+                                pass
                             if isinstance(chunk, dict) and chunk.get('type') == 'status' and chunk.get('status') == 'error':
                                 error_detected = True
+                                all_chunk.append({"index": index, "chunk": chunk})
+                                index += 1
                                 yield chunk
                                 continue
-                            
+
                             if chunk.get('type') == 'status':
                                 try:
                                     metadata = chunk.get('metadata', {})
                                     if isinstance(metadata, str):
                                         metadata = json.loads(metadata)
-                                    
+                                    content_obj = chunk.get('content', {})
+                                    if isinstance(content_obj, str):
+                                        try:
+                                            content_obj = json.loads(content_obj)
+                                        except Exception:
+                                            content_obj = {}
+
                                     if metadata.get('agent_should_terminate'):
                                         agent_should_terminate = True
-                                        
-                                        content = chunk.get('content', {})
-                                        if isinstance(content, str):
-                                            content = json.loads(content)
-                                        
-                                        if content.get('function_name'):
-                                            last_tool_call = content['function_name']
-                                        elif content.get('xml_tag_name'):
-                                            last_tool_call = content['xml_tag_name']
-                                            
+                                        if content_obj.get('function_name'):
+                                            last_tool_call = content_obj['function_name']
+                                        elif content_obj.get('xml_tag_name'):
+                                            last_tool_call = content_obj['xml_tag_name']
+
+                                    # 将包含 tool_call_id 的状态消息也补充 assistant_message_id，便于前端按页更新进度
+                                    tool_call_id_in_status = metadata.get('tool_call_id') or content_obj.get('tool_call_id')
+                                    if tool_call_id_in_status:
+                                        mapped_assistant_id = tool_call_assistant_map.get(str(tool_call_id_in_status))
+                                        if mapped_assistant_id:
+                                            metadata['assistant_message_id'] = mapped_assistant_id
+                                            chunk['metadata'] = json.dumps(metadata)
                                 except Exception:
                                     pass
                             
@@ -712,6 +806,8 @@ class AgentRunner:
                                 except Exception:
                                     pass
 
+                            all_chunk.append({"index": index, "chunk": chunk})
+                            index += 1
                             yield chunk
                     else:
                         error_detected = True
@@ -751,7 +847,7 @@ class AgentRunner:
             
             if generation:
                 generation.end(output=full_response)
-
+        logger.info(f"final_all_chunk: {all_chunk}")
         asyncio.create_task(asyncio.to_thread(lambda: langfuse.flush()))
         #         if isinstance(response, dict) and "status" in response and response["status"] == "error":
         #             yield response
