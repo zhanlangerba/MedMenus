@@ -76,6 +76,7 @@ class ToolManager:
     
     def register_all_tools(self):
         # 🧪 测试现有工具注册流程
+        logger.info("我现在开始加载工具！！！！")
         from agent.tools.simple_test_tool import SimpleTestTool
         self.thread_manager.add_tool(SimpleTestTool)
 
@@ -690,7 +691,14 @@ class AgentRunner:
                                             except Exception:
                                                 base_dt = datetime.now(timezone.utc)
                                             for i, tc in enumerate(tool_calls):
-                                                new_assistant_id = str(uuid4())
+                                                # 🔧 生成确定性UUID，与后端拆分逻辑保持一致
+                                                tool_call_id = tc.get('id') if isinstance(tc, dict) else f"unknown_{i}"
+                                                import hashlib
+                                                seed_data = f"assistant_split_{tool_call_id}_{self.config.thread_id}_{i}_v1"
+                                                hash_object = hashlib.md5(seed_data.encode())
+                                                hex_dig = hash_object.hexdigest()
+                                                new_assistant_id = f"{hex_dig[:8]}-{hex_dig[8:12]}-{hex_dig[12:16]}-{hex_dig[16:20]}-{hex_dig[20:]}"
+                                                
                                                 new_content = {
                                                     "role": "assistant",
                                                     "content": assistant_text if i == 0 else "",

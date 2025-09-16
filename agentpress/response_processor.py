@@ -831,13 +831,32 @@ class ResponseProcessor:
                     "tool_calls": complete_native_tool_calls or None
                     }
 
+                # 🔧 准备metadata，包含拆分信息
+                assistant_metadata = {"thread_run_id": thread_run_id}
+                
+                # 🔧 如果有多个tool_calls，在metadata中记录拆分映射信息
+                if complete_native_tool_calls and len(complete_native_tool_calls) > 1:
+                    assistant_metadata["split_for_frontend"] = True
+                    assistant_metadata["tool_call_count"] = len(complete_native_tool_calls)
+                    # 记录每个tool_call的映射信息，供前端拆分时使用
+                    tool_call_mapping = []
+                    for i, tool_call in enumerate(complete_native_tool_calls):
+                        tool_call_mapping.append({
+                            "index": i,
+                            "tool_call_id": tool_call.get("id", ""),
+                            "tool_name": tool_call.get("function", {}).get("name", ""),
+                            "include_text": i == 0  # 只有第一条包含assistant文本
+                        })
+                    assistant_metadata["tool_call_mapping"] = tool_call_mapping
+                    logger.info(f"🔧 记录拆分信息到metadata: {len(tool_call_mapping)}个tool_calls")
+
                 # 存储 assistant 消息到数据库中
                 last_assistant_message_object = await self._add_message_with_agent_info(
                     thread_id=thread_id,
                     type="assistant",
                     content=message_data,
                     is_llm_message=True,
-                    metadata={"thread_run_id": thread_run_id}
+                    metadata=assistant_metadata
                 )
 
                 if last_assistant_message_object:

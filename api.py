@@ -1,5 +1,5 @@
 from dotenv import load_dotenv # type: ignore
-load_dotenv()
+load_dotenv(override=True)
 
 # 设置日志级别
 import os
@@ -22,7 +22,6 @@ from fastapi.middleware.cors import CORSMiddleware # type: ignore
 # from services import redis
 # import sentry
 from contextlib import asynccontextmanager
-# from agentpress.thread_manager import ThreadManager
 from services.postgresql import DBConnection
 from utils.config import config, EnvMode
 from collections import OrderedDict
@@ -30,12 +29,7 @@ from collections import OrderedDict
 from flags import api as feature_flags_api
 from agent import api as agent_api
 from sandbox import api as sandbox_api
-# from services import billing as billing_api
-# 
 # from services import transcription as transcription_api
-# 
-# from services import email_api
-
 # from services import api_keys_api
 
 # 强制 asyncio 使用 Proactor 事件循环，以确保异步 I/O 的兼容性和稳定性。
@@ -53,7 +47,7 @@ async def lifespan(app: FastAPI):
         # 初始化PostgreSQL数据库连接
         await db.initialize()
         logger.info("PostgreSQL database connection initialized successfully")
-        
+          
         # 初始化Redis连接
         from services import redis
         try:
@@ -68,15 +62,14 @@ async def lifespan(app: FastAPI):
             instance_id
         )
 
-        # Start background tasks
-        # asyncio.create_task(agent_api.restore_running_agent_runs())
-
         sandbox_api.initialize(db)
-        triggers_api.initialize(db)  # 🔧 修复：初始化triggers数据库连接
-        # pipedream_api.initialize(db)
-        # credentials_api.initialize(db)
-        # template_api.initialize(db)
-        # composio_api.initialize(db)
+        
+        # 初始化triggers API（如果需要的话）
+        try:
+            triggers_api.initialize(db)
+            logger.info("Triggers API initialized successfully")
+        except Exception as e:
+            logger.warning(f"Triggers API initialization skipped: {e}")
         
         yield
         
@@ -160,6 +153,7 @@ async def options_handler(path: str):
 
 # 包含认证路由
 from auth.api import router as auth_router
+from utils.simple_auth_middleware import get_current_user_id_from_jwt
 api_router.include_router(auth_router)
 
 # Include feature flags router
@@ -206,6 +200,147 @@ api_router.include_router(triggers_api.router)
 
 # from composio_integration import api as composio_api
 # api_router.include_router(composio_api.router)
+
+@api_router.get("/sidebar/projects")
+async def get_projects(user_id: str = Depends(get_current_user_id_from_jwt)):
+    """get projects for sidebar"""
+    try:
+        logger.info(f"Getting projects for user: {user_id}")
+        
+        # 获取数据库客户端
+        client = await db.client
+      
+        # 查询用户的项目列表
+        logger.info(f"Querying projects table for account_id: {user_id}")
+        result = await client.table("projects").select("*").eq("account_id", user_id).order("created_at", desc=True).execute()
+        
+        if hasattr(result, 'data'):
+            logger.info(f"Projects result.data type: {type(result.data)}")
+            logger.info(f"Projects result.data length: {len(result.data) if result.data else 'None'}")
+        else:
+            logger.error(f"Projects result object has no 'data' attribute")
+        
+        # 检查是否有数据
+        if not result.data:
+            logger.info(f"No projects found for user: {user_id}")
+            return []
+        
+        # 格式化返回数据
+        projects = []
+        logger.info(f"🔄 Processing {len(result.data)} raw projects")
+        
+        for i, project in enumerate(result.data):
+            logger.info(f"Processing project {i+1}: {project.get('project_id', 'no-id')}")
+            
+            # 处理sandbox字段，确保包含必需的字段
+            sandbox_config = project.get("sandbox", {})
+            if not isinstance(sandbox_config, dict):
+                sandbox_config = {}
+            
+            # 确保sandbox包含所需字段
+            sandbox = {
+                "id": sandbox_config.get("id", ""),
+                "pass": sandbox_config.get("pass", ""), 
+                "vnc_preview": sandbox_config.get("vnc_preview", ""),
+                "sandbox_url": sandbox_config.get("sandbox_url", "")
+            }
+            
+            # 处理metadata中的is_public字段
+            metadata = project.get("metadata", {})
+            if not isinstance(metadata, dict):
+                metadata = {}
+            
+            formatted_project = {
+                "id": project["project_id"],  # 映射project_id为id
+                "name": project["name"],
+                "description": project.get("description", ""),
+                "account_id": project["account_id"],
+                "created_at": project["created_at"],
+                "updated_at": project["updated_at"],
+                "sandbox": sandbox,
+                "is_public": metadata.get("is_public", False)  # 从metadata中获取或默认为False
+            }
+            projects.append(formatted_project)
+        
+        logger.info(f"Final projects count: {len(projects)}")
+        logger.info(f"Final projects type: {type(projects)}")
+        
+        logger.info(f"Successfully found {len(projects)} projects for user: {user_id}")
+        return projects
+        
+    except Exception as e:
+        logger.error(f"Error getting projects for user {user_id}: {e}")
+        logger.error(f"Exception type: {type(e)}")
+        logger.error(f"Exception traceback:", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to get projects: {str(e)}")
+
+@api_router.get("/sidebar/threads")
+async def get_threads(user_id: str = Depends(get_current_user_id_from_jwt)):
+    """get threads for sidebar"""
+    try:
+        logger.info(f"Getting threads for user: {user_id}")
+        
+        # 获取数据库客户端
+        client = await db.client
+        
+        # 查询用户的线程列表，过滤掉is_agent_builder=true的线程
+        logger.info(f"Querying threads table for account_id: {user_id}")
+        result = await client.table("threads").select("*").eq("account_id", user_id).order("created_at", desc=True).execute()
+        
+        
+        if hasattr(result, 'data'):
+            logger.info(f"Result.data length: {len(result.data) if result.data else 'None'}")
+        else:
+            logger.error(f"Result object has no 'data' attribute")
+            logger.error(f"Result attributes: {dir(result)}")
+        
+        # 检查是否有数据
+        if not result.data:
+            logger.info(f"No threads found for user: {user_id}")
+            return []
+        
+        # 格式化返回数据并过滤
+        threads = []
+        logger.info(f"Processing {len(result.data)} raw threads")
+        
+        for i, thread in enumerate(result.data):
+            logger.info(f"Processing thread {i+1}: {thread.get('thread_id', 'no-id')}")
+            
+            # 处理metadata字段
+            metadata = thread.get("metadata", {})
+            if not isinstance(metadata, dict):
+                logger.info(f"Converting metadata from {type(metadata)} to dict")
+                metadata = {}
+            
+            logger.info(f"Thread metadata: {metadata}")
+            
+            # 过滤掉is_agent_builder为true的线程
+            if metadata.get("is_agent_builder") == True:
+                logger.info(f"Skipping thread {thread.get('thread_id')} - is_agent_builder=true")
+                continue
+                
+            formatted_thread = {
+                "id": thread["thread_id"],  # 映射thread_id为id
+                "name": thread.get("name", ""),
+                "project_id": thread["project_id"],
+                "account_id": thread["account_id"],
+                "status": thread.get("status", "active"),
+                "metadata": metadata,
+                "created_at": thread["created_at"],
+                "updated_at": thread["updated_at"]
+            }
+            
+            threads.append(formatted_thread)
+        
+        
+        logger.info(f"Successfully found {len(threads)} threads for user: {user_id}")
+        return threads
+        
+    except Exception as e:
+        logger.error(f"Error getting threads for user {user_id}: {e}")
+        logger.error(f"Exception type: {type(e)}")
+        logger.error(f"Exception traceback:", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to get threads: {str(e)}")
 
 @api_router.get("/health")
 async def health_check():

@@ -3833,22 +3833,66 @@ async def get_thread_messages(
         batch_size = 1000
         offset = 0
         all_messages = []
+        # 🔧 Step 1: 从 messages 表查询系统消息 (assistant, tool, status等)
+        all_system_messages = []
+        offset = 0
         while True:
-            # 从ADK events表查询消息
-            query = client.schema('public').table('events').select('*').eq('session_id', thread_id)
-            query = query.order('timestamp', desc=(order == "desc"))
+            query = client.table('messages').select('*').eq('thread_id', thread_id)
+            query = query.order('created_at', desc=(order == "desc"))
             query = query.range(offset, offset + batch_size - 1)
             messages_result = await query.execute()
             batch = messages_result.data or []
-            all_messages.extend(batch)
-            logger.debug(f"Fetched batch of {len(batch)} events (offset {offset})")
+            all_system_messages.extend(batch)
+            logger.debug(f"Fetched batch of {len(batch)} system messages (offset {offset})")
             if len(batch) < batch_size:
                 break
             offset += batch_size
         
-        # 转换ADK events为消息格式
-        converted_messages = _convert_adk_events_to_messages(all_messages)
-        return {"messages": converted_messages}
+        # 🔧 Step 2: 从 events 表查询用户消息
+        all_user_events = []
+        offset = 0  
+        while True:
+            query = client.schema('public').table('events').select('*').eq('session_id', thread_id).eq('author', 'user')
+            query = query.order('timestamp', desc=(order == "desc"))
+            query = query.range(offset, offset + batch_size - 1)
+            events_result = await query.execute()
+            batch = events_result.data or []
+            all_user_events.extend(batch)
+            logger.debug(f"Fetched batch of {len(batch)} user events (offset {offset})")
+            if len(batch) < batch_size:
+                break
+            offset += batch_size
+        
+        # 🔧 Step 3: 转换并合并两种数据源
+        system_messages = _format_messages_from_table(all_system_messages)
+        user_messages = _convert_user_events_to_messages(all_user_events)
+        
+        # 🔧 Step 4: 合并并按时间排序
+        all_messages = system_messages + user_messages
+        all_messages.sort(key=lambda x: x.get('created_at', ''), reverse=(order == "desc"))
+        
+        # 🔍 详细统计
+        system_stats = {}
+        for msg in system_messages:
+            msg_type = msg.get('type', 'unknown')
+            system_stats[msg_type] = system_stats.get(msg_type, 0) + 1
+            
+        user_stats = {}
+        for msg in user_messages:
+            msg_type = msg.get('type', 'unknown')  
+            user_stats[msg_type] = user_stats.get(msg_type, 0) + 1
+        
+        all_stats = {}
+        for msg in all_messages:
+            msg_type = msg.get('type', 'unknown')
+            all_stats[msg_type] = all_stats.get(msg_type, 0) + 1
+        
+        logger.info(f"🔗 合并结果统计:")
+        logger.info(f"  📨 系统消息{len(system_messages)}条: {system_stats}")
+        logger.info(f"  👤 用户消息{len(user_messages)}条: {user_stats}")
+        logger.info(f"  📊 总计{len(all_messages)}条: {all_stats}")
+        
+        return {"messages": all_messages}
     except Exception as e:
         logger.error(f"Error fetching messages for thread {thread_id}: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to fetch messages: {str(e)}")
@@ -4313,68 +4357,249 @@ async def _log_adk_agent_response_event(client, user_id: str, response_content: 
         logger.error(f"记录AI回复事件失败: {e}")
         raise
 
-def _convert_adk_events_to_messages(events):
-    """将ADK events表数据转换为messages表格式"""
-    messages = []
+def _format_messages_from_table(messages):
+    """格式化messages表数据为前端期望格式，支持assistant消息动态拆分"""
+    formatted_messages = []
+    
+    # 🔍 调试：检查原始数据库消息
+    logger.info(f"🔍 数据库原始消息数量: {len(messages)}")
+    raw_message_stats = {}
+    for msg in messages:
+        msg_type = msg.get('type', 'unknown')
+        raw_message_stats[msg_type] = raw_message_stats.get(msg_type, 0) + 1
+    logger.info(f"🔍 原始消息类型统计: {raw_message_stats}")
+    
+    # 🔍 特别检查原始assistant消息
+    raw_assistant_messages = [msg for msg in messages if msg.get('type') == 'assistant']
+    if raw_assistant_messages:
+        for assistant_msg in raw_assistant_messages:
+            raw_msg_id = assistant_msg.get('message_id')
+            logger.info(f"🔍 发现原始assistant消息: ID={raw_msg_id} (类型: {type(raw_msg_id)}), metadata预览={str(assistant_msg.get('metadata', ''))[:200]}...")
+    else:
+        logger.warning("⚠️ 数据库查询结果中没有assistant消息！")
+    
+    for msg in messages:
+        try:
+            # 🔧 处理content字段 - 解析为对象以便后续判断
+            content = msg.get('content', {})
+            content_obj = content
+            if isinstance(content, str):
+                try:
+                    import json
+                    content_obj = json.loads(content)
+                    content_str = content
+                except:
+                    content_str = str(content) if content else "{}"
+                    content_obj = {}
+            elif isinstance(content, dict):
+                import json
+                content_str = json.dumps(content, ensure_ascii=False)
+                content_obj = content
+            else:
+                content_str = str(content) if content else "{}"
+                content_obj = {}
+            
+            # 🔧 处理metadata字段 - 解析为对象以便后续判断
+            metadata = msg.get('metadata', {})
+            metadata_obj = metadata
+            if isinstance(metadata, str):
+                try:
+                    import json
+                    metadata_obj = json.loads(metadata)
+                    metadata_str = metadata
+                except:
+                    metadata_str = str(metadata) if metadata else "{}"
+                    metadata_obj = {}
+            elif isinstance(metadata, dict):
+                import json
+                metadata_str = json.dumps(metadata, ensure_ascii=False)
+                metadata_obj = metadata
+            else:
+                metadata_str = str(metadata) if metadata else "{}"
+                metadata_obj = {}
+            
+            # 🔧 检查是否需要拆分assistant消息
+            if (msg.get("type") == "assistant" and 
+                metadata_obj.get("split_for_frontend") == True and
+                metadata_obj.get("tool_call_mapping")):
+                
+                logger.info(f"🔧 检测到需要拆分的assistant消息: {msg.get('message_id')}")
+                tool_call_mapping = metadata_obj.get("tool_call_mapping", [])
+                assistant_text = content_obj.get("content", "")
+                tool_calls = content_obj.get("tool_calls", [])
+                
+                # 为每个tool_call创建单独的assistant消息
+                for mapping in tool_call_mapping:
+                    index = mapping.get("index", 0)
+                    tool_call_id = mapping.get("tool_call_id", "")
+                    include_text = mapping.get("include_text", False)
+                    
+                    # 找到对应的tool_call对象
+                    matching_tool_call = None
+                    for tc in tool_calls:
+                        if tc.get("id") == tool_call_id:
+                            matching_tool_call = tc
+                            break
+                    
+                    if matching_tool_call:
+                        # 🔧 生成确定性UUID（与agent/run.py保持一致）
+                        import hashlib
+                        seed_data = f"assistant_split_{tool_call_id}_{msg.get('thread_id')}_{index}_v1"
+                        hash_object = hashlib.md5(seed_data.encode())
+                        hex_dig = hash_object.hexdigest()
+                        deterministic_uuid = f"{hex_dig[:8]}-{hex_dig[8:12]}-{hex_dig[12:16]}-{hex_dig[16:20]}-{hex_dig[20:]}"
+                        
+                        # 构建拆分后的消息内容
+                        split_content = {
+                            "role": "assistant",
+                            "content": assistant_text if include_text else "",
+                            "tool_calls": [matching_tool_call]
+                        }
+                        
+                        # 构建拆分后的元数据
+                        split_metadata = metadata_obj.copy()
+                        split_metadata["tool_index"] = index
+                        split_metadata["original_message_id"] = str(msg.get("message_id")) if msg.get("message_id") else None
+                        
+                        # 创建拆分后的消息 - 确保所有UUID字段都是字符串
+                        split_message = {
+                            "message_id": deterministic_uuid,
+                            "thread_id": str(msg.get("thread_id")) if msg.get("thread_id") else None,
+                            "type": "assistant",
+                            "role": "assistant",
+                            "is_llm_message": msg.get("is_llm_message", False),
+                            "content": json.dumps(split_content, ensure_ascii=False),
+                            "metadata": json.dumps(split_metadata, ensure_ascii=False),
+                            "created_at": msg.get("created_at"),
+                            "updated_at": msg.get("updated_at"),
+                            "agent_id": str(msg.get("agent_id")) if msg.get("agent_id") else None,
+                            "agent_version_id": str(msg.get("agent_version_id")) if msg.get("agent_version_id") else None
+                        }
+                        
+                        formatted_messages.append(split_message)
+                        logger.info(f"✅ 拆分assistant消息: {deterministic_uuid} (tool: {matching_tool_call.get('function', {}).get('name', 'unknown')})")
+                        logger.debug(f"🔍 拆分消息字段类型检查: message_id={type(deterministic_uuid)}, thread_id={type(split_message['thread_id'])}")
+                
+            else:
+                # 🔧 普通消息处理逻辑 - 确保所有UUID字段都是字符串
+                formatted_message = {
+                    "message_id": str(msg.get("message_id")) if msg.get("message_id") else None,
+                    "thread_id": str(msg.get("thread_id")) if msg.get("thread_id") else None,
+                    "type": msg.get("type"),  # assistant, user, tool, status等
+                    "role": msg.get("role"),  # assistant, user, system等
+                    "is_llm_message": msg.get("is_llm_message", False),
+                    "content": content_str,     # JSON字符串格式
+                    "metadata": metadata_str,   # JSON字符串格式  
+                    "created_at": msg.get("created_at"),
+                    "updated_at": msg.get("updated_at"),
+                    "agent_id": str(msg.get("agent_id")) if msg.get("agent_id") else None,
+                    "agent_version_id": str(msg.get("agent_version_id")) if msg.get("agent_version_id") else None
+                }
+                
+                formatted_messages.append(formatted_message)
+            
+        except Exception as e:
+            logger.warning(f"跳过格式错误的消息 {msg.get('message_id', 'unknown')}: {e}")
+            continue
+    
+                # 🔧 更新tool消息的assistant_message_id关联
+    assistant_messages = [msg for msg in formatted_messages if msg.get('type') == 'assistant']
+    tool_messages = [msg for msg in formatted_messages if msg.get('type') == 'tool']
+    
+    # 创建tool_call_id到assistant_message_id的映射
+    tool_call_to_assistant = {}
+    for assistant_msg in assistant_messages:
+        try:
+            content = assistant_msg.get('content', {})
+            if isinstance(content, str):
+                content = json.loads(content)
+            
+            tool_calls = content.get('tool_calls', [])
+            for tool_call in tool_calls:
+                tool_call_id = tool_call.get('id')
+                if tool_call_id:
+                    tool_call_to_assistant[tool_call_id] = assistant_msg.get('message_id')
+        except Exception as e:
+            logger.warning(f"⚠️ 解析assistant消息content失败: {e}")
+    
+    # 更新tool消息的assistant_message_id
+    updated_tool_count = 0
+    for tool_msg in tool_messages:
+        try:
+            metadata = tool_msg.get('metadata', {})
+            if isinstance(metadata, str):
+                metadata = json.loads(metadata)
+            
+            tool_call_id = metadata.get('tool_call_id')
+            if tool_call_id and tool_call_id in tool_call_to_assistant:
+                correct_assistant_id = tool_call_to_assistant[tool_call_id]
+                metadata['assistant_message_id'] = correct_assistant_id
+                tool_msg['metadata'] = json.dumps(metadata, ensure_ascii=False)
+                updated_tool_count += 1
+                logger.info(f"🔗 更新tool消息 {tool_msg.get('message_id')} -> assistant {correct_assistant_id}")
+        except Exception as e:
+            logger.warning(f"⚠️ 更新tool消息关联失败 {tool_msg.get('message_id')}: {e}")
+    
+    # 🔍 最终统计
+    logger.info(f"🤖 最终Assistant消息数量: {len(assistant_messages)}")
+    logger.info(f"🔧 Tool消息数量: {len(tool_messages)}")
+    logger.info(f"🔗 更新了 {updated_tool_count} 个tool消息的关联")
+    
+    return formatted_messages
+
+
+def _convert_user_events_to_messages(events):
+    """将用户events转换为前端期望的消息格式"""
+    user_messages = []
     
     for event in events:
         try:
-            # 解析content字段
+            # 🔧 解析content字段
             content = event.get('content')
             if isinstance(content, str):
                 import json
                 content = json.loads(content)
             
-            # ✅ 提取纯文本内容（前端期望格式）
-            message_text = ""
-            if isinstance(content, dict):
-                # ADK格式：{"role": "user", "parts": [{"text": "..."}]}
-                if 'parts' in content and isinstance(content['parts'], list):
-                    text_parts = []
-                    logger.debug(f"Processing {len(content['parts'])} parts for event {event.get('id', 'unknown')}")
-                    for i, part in enumerate(content['parts']):
-                        if isinstance(part, dict) and 'text' in part:
-                            part_text = part['text'].strip()
-                            logger.debug(f"Part {i}: {part_text[:100]}{'...' if len(part_text) > 100 else ''}")
-                            # 🔧 防止重复文本：只添加不重复的部分
-                            if part_text and part_text not in text_parts:
-                                text_parts.append(part_text)
-                            else:
-                                logger.warning(f"Skipped duplicate/empty part {i} in event {event.get('id', 'unknown')}")
-                    message_text = ' '.join(text_parts).strip()
-                    logger.debug(f"Final message_text length: {len(message_text)}")
-                # 旧格式：{"role": "user", "content": "..."}
-                elif 'content' in content:
-                    message_text = content['content']
-                # 其他格式：尝试转换为字符串
-                else:
-                    message_text = str(content)
+            # 🔧 提取用户文本内容
+            user_text = ""
+            if isinstance(content, dict) and 'parts' in content:
+                text_parts = []
+                for part in content['parts']:
+                    if isinstance(part, dict) and 'text' in part:
+                        text_parts.append(part['text'].strip())
+                user_text = ' '.join(text_parts).strip()
+            elif isinstance(content, dict) and 'content' in content:
+                user_text = content['content']
             else:
-                message_text = str(content)
+                user_text = str(content)
             
-            # ✅ 转换为messages表格式（前端兼容）
-            # 🔧 处理ADK的role映射：model -> assistant
-            content_role = content.get("role", event.get("author", "user"))
-            if content_role == "model":
-                message_type = "assistant"
-            else:
-                message_type = content_role
-                
-            message = {
-                "message_id": content.get("message_id", event["id"]),
-                "thread_id": event["session_id"], 
-                "type": message_type,
-                "is_llm_message": True,
-                "content": message_text,  # ✅ 返回纯文本字符串，前端可以调用.match()
-                "created_at": event["timestamp"],
-                "author": event.get("author", "user"),
-                "event_id": event["id"]
+            # 🔧 构建前端期望的用户消息格式
+            import json
+            user_content = {
+                "role": "user",
+                "content": user_text
             }
             
-            messages.append(message)
+            formatted_message = {
+                "message_id": str(event.get("id")) if event.get("id") else None,
+                "thread_id": str(event.get("session_id")) if event.get("session_id") else None,
+                "type": "user",
+                "role": "user", 
+                "is_llm_message": False,
+                "content": json.dumps(user_content, ensure_ascii=False),  # JSON字符串
+                "metadata": "{}",  # 空metadata
+                "created_at": event.get("timestamp"),
+                "updated_at": event.get("timestamp"),  # 使用timestamp作为updated_at
+                "agent_id": None,
+                "agent_version_id": None
+            }
+            
+            user_messages.append(formatted_message)
+            logger.debug(f"转换用户消息: {event.get('id')} - {user_text[:50]}{'...' if len(user_text) > 50 else ''}")
             
         except Exception as e:
-            logger.warning(f"跳过格式错误的事件 {event.get('id', 'unknown')}: {e}")
+            logger.warning(f"跳过格式错误的用户事件 {event.get('id', 'unknown')}: {e}")
             continue
     
-    return messages
+    logger.info(f"🔄 转换了 {len(user_messages)} 条用户消息")
+    return user_messages

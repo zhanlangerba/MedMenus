@@ -21,11 +21,11 @@ REDIS_KEY_TTL = 3600 * 24  # 默认24小时过期时间
 
 
 def initialize():
-    """初始化Redis连接池和客户端（同步版本）"""
+    """Initialize Redis connection pool and client"""
     global client, pool
 
     # 加载环境变量（如果尚未加载）
-    load_dotenv()
+    load_dotenv(override=True)
 
     # 从环境变量获取Redis配置
     redis_host = os.getenv("REDIS_HOST", "redis")  # Redis主机地址，默认"redis"
@@ -59,9 +59,8 @@ def initialize():
 
     return client
 
-
 async def initialize_async():
-    """异步初始化Redis连接"""
+    """Async initialize Redis connection"""
     global client, _initialized
 
     async with _init_lock:  # 使用异步锁防止并发初始化
@@ -87,9 +86,8 @@ async def initialize_async():
 
     return client
 
-
 async def close():
-    """关闭Redis连接和连接池"""
+    """Close Redis connection and connection pool"""
     global client, pool, _initialized
     
     # 关闭Redis客户端连接
@@ -119,125 +117,112 @@ async def close():
     _initialized = False  # 重置初始化状态
     logger.info("Redis connection and connection pool closed")
 
-
 async def get_client():
-    """获取Redis客户端，如果未初始化则自动初始化"""
+    """Get Redis client, if not initialized then initialize it"""
     global client, _initialized
     if client is None or not _initialized:
+        # 默认配置
+        # max_attempts = 3 - 最多尝试3次
+        # delay_seconds = 1 - 每次重试间隔1秒
         await retry(lambda: initialize_async())  # 使用重试机制初始化
     return client
 
-
-# ==================== 基本Redis操作 ====================
-
 async def set(key: str, value: str, ex: int = None, nx: bool = False):
-    """设置Redis键值对
+    """Set Redis key-value pair
     
     Args:
-        key: 键名
+        key: key name
         value: 值
-        ex: 过期时间（秒），可选
-        nx: 仅在键不存在时设置，可选
+        ex: expiration time (seconds), optional
+        nx: only set if key does not exist, optional
     """
     redis_client = await get_client()
     return await redis_client.set(key, value, ex=ex, nx=nx)
 
-
 async def get(key: str, default: str = None):
-    """获取Redis键值
+    """Get Redis key-value
     
     Args:
-        key: 键名
-        default: 默认值，当键不存在时返回
+        key: key name
+        default: default value, return when key does not exist
     """
     redis_client = await get_client()
     result = await redis_client.get(key)
     return result if result is not None else default
 
-
 async def delete(key: str):
-    """删除Redis键
+    """Delete Redis key
     
     Args:
-        key: 要删除的键名
+        key: key name
     """
     redis_client = await get_client()
     return await redis_client.delete(key)
 
-
 async def publish(channel: str, message: str):
-    """发布消息到Redis频道（发布/订阅模式）
+    """Publish message to Redis channel (publish/subscribe mode)
     
     Args:
-        channel: 频道名称
-        message: 要发布的消息
+        channel: channel name
+        message: message to publish
     """
     redis_client = await get_client()
     return await redis_client.publish(channel, message)
 
-
 async def create_pubsub():
-    """创建Redis发布/订阅对象
+    """Create Redis publish/subscribe object
     
     Returns:
-        Redis pubsub对象，用于订阅频道
+        Redis pubsub object, for subscribing to channels
     """
     redis_client = await get_client()
     return redis_client.pubsub()
 
-
-# ==================== 列表操作 ====================
-
 async def rpush(key: str, *values: Any):
-    """向列表右侧添加一个或多个值
+    """Add one or more values to the right side of the list
     
     Args:
-        key: 列表键名
-        *values: 要添加的值（可变参数）
+        key: list key name
+        *values: values to add (variable arguments)
     """
     redis_client = await get_client()
     return await redis_client.rpush(key, *values)
 
-
 async def lrange(key: str, start: int, end: int) -> List[str]:
-    """获取列表中指定范围的元素
+    """Get elements in the specified range of the list
     
     Args:
-        key: 列表键名
-        start: 起始索引
-        end: 结束索引（包含）
+        key: list key name
+        start: start index
+        end: end index (inclusive)
     
     Returns:
-        指定范围的元素列表
+        list of elements in the specified range
     """
     redis_client = await get_client()
     return await redis_client.lrange(key, start, end)
 
-
-# ==================== 键管理操作 ====================
-
 async def keys(pattern: str) -> List[str]:
-    """根据模式查找匹配的键
+    """Find keys matching the pattern
     
     Args:
-        pattern: 键名模式，支持通配符（如：user:*）
+        pattern: key name pattern, supports wildcards (e.g. user:*)
     
     Returns:
-        匹配的键名列表
+        list of keys matching the pattern
     """
     redis_client = await get_client()
     return await redis_client.keys(pattern)
 
-
 async def expire(key: str, seconds: int):
-    """设置键的过期时间
+    """Set the expiration time of the key
     
     Args:
-        key: 键名
-        seconds: 过期时间（秒）
+        key: key name
+        seconds: expiration time (seconds)
     
     Returns:
-        设置是否成功
+        whether the expiration time is set successfully
     """
     redis_client = await get_client()
     return await redis_client.expire(key, seconds)
