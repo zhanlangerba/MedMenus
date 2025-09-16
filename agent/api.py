@@ -4563,14 +4563,14 @@ def _convert_user_events_to_messages(events):
             # 🔧 提取用户文本内容
             user_text = ""
             if isinstance(content, dict) and 'parts' in content:
-                text_parts = []
+                    text_parts = []
                 for part in content['parts']:
-                    if isinstance(part, dict) and 'text' in part:
+                        if isinstance(part, dict) and 'text' in part:
                         text_parts.append(part['text'].strip())
                 user_text = ' '.join(text_parts).strip()
             elif isinstance(content, dict) and 'content' in content:
                 user_text = content['content']
-            else:
+                            else:
                 user_text = str(content)
             
             # 🔧 构建前端期望的用户消息格式
