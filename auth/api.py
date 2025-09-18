@@ -1,5 +1,5 @@
 """
-用户认证模块
+User authentication module
 """
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Form  # type: ignore
@@ -24,7 +24,7 @@ auth_utils = AuthUtils()
 async def get_current_user_id(
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(security)
 ) -> str:
-    """从JWT token中获取当前用户ID"""
+    """Get current user ID from JWT token"""
     if not credentials:
         raise HTTPException(status_code=401, detail="Authentication required")
     
@@ -39,12 +39,13 @@ async def get_current_user_id(
 
 @router.post("/register", response_model=AuthResponse)
 async def register(request: Request):
-    """用户注册"""
+    """处理用户注册请求"""
     try:
         # 解析前端表单数据（注册的用户名和密码）
         parsed_data = await parse_request_data(request)
         auth_data = extract_auth_data(parsed_data)
         
+        # 提取注册数据
         email = auth_data['email']
         password = auth_data['password']
         confirmPassword = auth_data['confirmPassword']
@@ -84,7 +85,7 @@ async def register(request: Request):
 
 @router.post("/login", response_model=AuthResponse)
 async def login(request: Request):
-    """用户登录"""
+    """User login"""
     try:
         # 解析前端表单数据（登录的用户名和密码）
         parsed_data = await parse_request_data(request)
@@ -133,7 +134,7 @@ async def refresh_token(request: RefreshRequest):
 
 @router.get("/me", response_model=UserResponse)
 async def get_current_user(user_id: str = Depends(get_current_user_id)):
-    """获取当前用户信息"""
+    """Get current user info"""
     try:
         return await auth_service.get_user(user_id)
     except HTTPException:
@@ -147,7 +148,7 @@ async def logout(
     request: Optional[RefreshRequest] = None,
     user_id: str = Depends(get_current_user_id)
 ):
-    """用户登出"""
+    """user logout"""
     try:
         refresh_token = request.refresh_token if request else None
         await auth_service.logout(user_id, refresh_token)
@@ -155,8 +156,3 @@ async def logout(
     except Exception as e:
         logger.error(f"Logout error: {e}")
         raise HTTPException(status_code=500, detail="Logout failed")
-
-@router.get("/health")
-async def health():
-    """健康检查"""
-    return {"status": "ok", "service": "auth"} 

@@ -8,14 +8,22 @@ MODELS = {
         },
         "tier_availability": ["free", "paid"]
     },
-    # "openrouter/deepseek/deepseek-chat": {
-    #     "aliases": ["deepseek"],
-    #     "pricing": {
-    #         "input_cost_per_million_tokens": 0.38,
-    #         "output_cost_per_million_tokens": 0.89
-    #     },
-    #     "tier_availability": ["free", "paid"]
-    # },
+    "openrouter/deepseek/deepseek-chat": {
+        "aliases": ["openrouter-deepseek"],
+        "pricing": {
+            "input_cost_per_million_tokens": 0.14,
+            "output_cost_per_million_tokens": 0.28
+        },
+        "tier_availability": ["free", "paid"]
+    },
+    "deepseek/deepseek-chat": {
+        "aliases": ["deepseek", "deepseek-chat", "DeepSeek", "DeepSeek/DeepSeek-chat", "DeepSeek-chat"],
+        "pricing": {
+            "input_cost_per_million_tokens": 0.14,
+            "output_cost_per_million_tokens": 0.28
+        },
+        "tier_availability": ["free", "paid"]
+    },
     # "openrouter/qwen/qwen3-235b-a22b": {
     #     "aliases": ["qwen3"],
     #     "pricing": {

@@ -438,12 +438,11 @@ async def make_adk_api_call(
     model_name: str = "openai/gpt-4o",
     temperature: float = 0,
     max_tokens: Optional[int] = None,
-    tools: Optional[Union[List[Dict[str, Any]], Dict[str, callable], List]] = None,  # 🔄 支持ADK工具列表
+    tools: Optional[Union[List[Dict[str, Any]], Dict[str, callable], List]] = None, 
     tool_choice: str = "auto",
     stream: bool = True,
     enable_thinking: Optional[bool] = False,
     reasoning_effort: Optional[str] = 'low',
-    # manual_message_id: Optional[str] = None,  # 🔗 现在使用上下文变量
 ) -> Union[AsyncGenerator, Dict[str, Any]]:
     """
     Make an API call using Google ADK (Agent Development Kit).
@@ -468,6 +467,14 @@ async def make_adk_api_call(
     logger.info(f"Preparing to make ADK API call")
     logger.info(f"Input parameters: model_name={model_name}, stream={stream}, temperature={temperature}")
     logger.info(f"Messages length: {len(messages)}")
+    
+    # 🔍 详细打印所有传入的消息
+    logger.info("🔍 ===== 前端传递的完整消息列表 =====")
+    for i, msg in enumerate(messages):
+        logger.info(f"  Message {i}: role={msg.get('role')}, content={msg.get('content')}")
+        if msg.get('user_id'):
+            logger.info(f"    metadata: user_id={msg.get('user_id')}, session_id={msg.get('session_id')}, thread_id={msg.get('thread_id')}")
+    logger.info("🔍 ===== 消息列表结束 =====")
 
     # 提取元数据
     for message in messages:
@@ -475,7 +482,11 @@ async def make_adk_api_call(
             app_name = message.get('app_name', 'fufanmanus')
             user_id = message.get('user_id', 'default_user')
             session_id = message.get('session_id', 'default_session')
-            logger.info(f"From adk events: app_name={app_name}, user_id={user_id}, session_id={session_id}")
+            thread_id = message.get('thread_id')  # 新增：提取thread_id
+            logger.info(f"From adk events: app_name={app_name}, user_id={user_id}, session_id={session_id}, thread_id={thread_id}")
+            
+            # 🔍 调试：检查session_id一致性
+            logger.info(f"🔍 Session ID验证: session_id={session_id}, thread_id={thread_id}")
             
             # 🔗 设置session_id到上下文中，供ADK回调使用
             current_session_id_context.set(session_id)
@@ -484,9 +495,14 @@ async def make_adk_api_call(
 
     # 获取用户消息内容
     user_message = None
+    logger.info(f"🔍 开始提取用户消息，总消息数量: {len(messages)}")
+    
     for i, msg in enumerate(reversed(messages)):
+        logger.info(f"🔍 检查消息 {i}: role={msg.get('role')}, content类型={type(msg.get('content'))}")
+        
         if msg.get('role') == 'user':
             content = msg.get('content', '')
+            logger.info(f"🎯 找到用户消息，原始content: {content}")
             
             # 这里的逻辑用来适配处理多模态消息格式
             if isinstance(content, list):
@@ -496,6 +512,7 @@ async def make_adk_api_call(
                     if isinstance(part, dict) and part.get('type') == 'text':
                         text_parts.append(part.get('text', ''))
                 user_message = ' '.join(text_parts).strip()
+                logger.info(f"📝 多模态消息提取结果: {user_message}")
                 
                 # 如果有非文本内容，记录警告
                 non_text_parts = [p for p in content if isinstance(p, dict) and p.get('type') != 'text']
@@ -505,29 +522,53 @@ async def make_adk_api_call(
             elif isinstance(content, str):
                 # 普通文本消息
                 user_message = content
+                logger.info(f"📝 字符串消息提取结果: {user_message}")
             else:
                 # 其他格式，尝试转换为字符串
                 user_message = str(content) if content else ''
+                logger.info(f"📝 其他格式转换结果: {user_message}")
                 
+            logger.info(f"✅ 最终用户消息: '{user_message}'")
             break
-            
+    
+    logger.info(f"🔍 用户消息提取完成，结果: user_message='{user_message}'")        
     if not user_message:
+        logger.error("❌ 未找到用户消息！")
         raise LLMError("No user message found in messages")
 
     # 创建用户内容
+    logger.info(f"🔧 准备创建ADK用户内容：'{user_message}'")
     user_content = types.Content(
         role='user', 
         parts=[types.Part(text=user_message)]  # 现在确保 user_message 是字符串
     )
+    logger.info(f"✅ ADK用户内容创建完成: role={user_content.role}, parts数量={len(user_content.parts)}")
+    logger.info(f"🔍 第一个part的文本: '{user_content.parts[0].text}'")
 
     # 设置流式模式
     streaming_mode = StreamingMode.SSE if stream else StreamingMode.NONE
     
     run_config = RunConfig(streaming_mode=streaming_mode)
     
+    # 🔍 添加调试日志 - 显示前端传递的原始model_name
+    logger.info(f"🔍 Frontend passed model_name: {model_name}")
+    
     # 从模型名称解析实际使用的模型和API Key
     resolved_model = MODEL_NAME_ALIASES.get(model_name, model_name)
     logger.info(f"Resolved model: {resolved_model}")
+    
+    # 🔧 特殊处理 DeepSeek 模型格式 (后备方案)
+    if "DeepSeek" in model_name and "/" in model_name:
+        logger.warning(f"Detected uppercase DeepSeek format: {model_name}, converting to standard format")
+        resolved_model = "deepseek/deepseek-chat"
+        logger.info(f"Converted to: {resolved_model}")
+    
+    # 🔍 添加调试日志 - 显示MODEL_NAME_ALIASES中是否有这个映射
+    if model_name in MODEL_NAME_ALIASES:
+        logger.info(f"✅ Found alias mapping: {model_name} -> {MODEL_NAME_ALIASES[model_name]}")
+    else:
+        logger.warning(f"❌ No alias mapping found for: {model_name}, available aliases: {list(MODEL_NAME_ALIASES.keys())[:10]}")
+    
     # 根据模型提供商获取对应的API Key
     resolved_api_key = None
     provider = "Unknown"
@@ -562,13 +603,28 @@ async def make_adk_api_call(
     logger.info(f"Using provider: {provider}")
     logger.info(f"API Key: {resolved_api_key}")
     
+    # 根据提供商确定 api_base
+    resolved_api_base = None
+    if "deepseek" in resolved_model.lower():
+        resolved_api_base = config.DEEPSEEK_API_BASE
+    elif "openrouter" in resolved_model.lower():
+        resolved_api_base = config.OPENROUTER_API_BASE
+    
+    if resolved_api_base:
+        logger.info(f"Using API Base: {resolved_api_base}")
+    
     logger.info(f"Creating LiteLlm model with model={resolved_model}")
     
-    # 创建LiteLlm模型
-    model = LiteLlm(
-        model=resolved_model,
-        api_key=resolved_api_key
-    )    
+    # 创建LiteLlm模型，根据是否有api_base来决定参数
+    model_params = {
+        "model": resolved_model,
+        "api_key": resolved_api_key
+    }
+    
+    if resolved_api_base:
+        model_params["api_base"] = resolved_api_base
+    
+    model = LiteLlm(**model_params)    
     # model = LiteLlm(
     #     model="deepseek/deepseek-chat",  
     #     api_key="sk-77ef05a6295b44579f7cc72ab4a537dd",
@@ -673,6 +729,9 @@ async def make_adk_api_call(
         
         # 如果 ModelOnlyDBSessionService 创建成功，获取或创建会话
         try:
+            # 🔍 先检查是否存在匹配的会话（通过user_id查找）
+            logger.info(f"🔍 尝试获取会话: app_name={app_name}, user_id={user_id}, session_id={session_id}")
+            
             # 先尝试获取现有会话
             existing_session = await session_service.get_session(
                 app_name=app_name, 
@@ -681,11 +740,41 @@ async def make_adk_api_call(
             )
             
             if existing_session:
-                logger.info(f"Using existing session: {existing_session}")
+                logger.info(f"✅ 找到现有会话: {existing_session}")
+                logger.info(f"📚 会话历史记录数量: {len(existing_session.events) if hasattr(existing_session, 'events') else 'Unknown'}")
             else:
+                logger.warning(f"⚠️ 未找到会话 {session_id}，将创建新会话")
+                
+                # 🔍 额外检查：是否有其他session_id的会话存在
+                # 这里可以添加数据库直接查询来找到可能的session不匹配问题
+                try:
+                    import asyncpg # type: ignore
+                    conn = await asyncpg.connect(DATABASE_URL)
+                    try:
+                        # 查找该用户的所有会话
+                        all_sessions = await conn.fetch(
+                            "SELECT id, app_name, user_id, created_at FROM sessions WHERE user_id = $1 ORDER BY created_at DESC LIMIT 5",
+                            user_id
+                        )
+                        logger.info(f"🔍 用户 {user_id} 的所有会话:")
+                        for session in all_sessions:
+                            logger.info(f"  - session_id: {session['id']}, app_name: {session['app_name']}, created_at: {session['created_at']}")
+                            
+                        # 查找该session_id对应的事件数量
+                        event_count = await conn.fetchval(
+                            "SELECT COUNT(*) FROM events WHERE session_id = $1",
+                            session_id
+                        )
+                        logger.info(f"🔍 session_id {session_id} 的事件数量: {event_count}")
+                        
+                    finally:
+                        await conn.close()
+                except Exception as db_debug_error:
+                    logger.warning(f"调试查询失败: {db_debug_error}")
+                
                 # 会话不存在，创建新的
                 await session_service.create_session(app_name=app_name, user_id=user_id, session_id=session_id)
-                logger.info(f"Created new session: {session_id}")
+                logger.info(f"🆕 创建新会话: {session_id}")
                 
         except Exception as session_error:
             logger.error(f"Session operation failed: {session_error}")
@@ -741,19 +830,53 @@ async def make_adk_api_call(
         await session_service.create_session(app_name=app_name, user_id=user_id, session_id=session_id)
         logger.info(f"InMemorySessionService created successfully: {session_id}")
 
+    # 🔍 最后验证：确保SessionService包含历史数据
+    try:
+        final_session_check = await session_service.get_session(
+            app_name=app_name, 
+            user_id=user_id, 
+            session_id=session_id
+        )
+        if final_session_check:
+            event_count = len(final_session_check.events) if hasattr(final_session_check, 'events') else 0
+            logger.info(f"🔍 最终会话验证: session_id={session_id}, 历史事件数量={event_count}")
+            
+            # 如果有历史事件，打印最近几条
+            if hasattr(final_session_check, 'events') and final_session_check.events:
+                logger.info("📚 最近的历史事件:")
+                for i, event in enumerate(final_session_check.events[-3:]):  # 显示最后3条
+                    logger.info(f"  {i+1}. author={getattr(event, 'author', 'unknown')}, content={str(getattr(event, 'content', ''))[:50]}...")
+        else:
+            logger.error(f"❌ 最终会话验证失败: 无法获取session {session_id}")
+    except Exception as final_check_error:
+        logger.error(f"最终会话验证失败: {final_check_error}")
+
     runner = Runner(
         agent=agent,
         app_name=app_name,
-        session_service=session_service
+        session_service=session_service  # 🔑 关键：传递包含历史数据的session_service
     )
 
+    logger.info(f"🎯 Runner创建完成，准备运行: user_id={user_id}, session_id={session_id}")
+    
+    # 🔍 最后验证用户消息
+    logger.info(f"🚀 即将调用 runner.run_async:")
+    logger.info(f"  - user_id: {user_id}")
+    logger.info(f"  - session_id: {session_id}")
+    logger.info(f"  - new_message.role: {user_content.role}")
+    logger.info(f"  - new_message.parts[0].text: '{user_content.parts[0].text}'")
+    logger.info(f"  - run_config: {run_config}")
+
     # 直接返回 runner.run_async 的异步生成器，就像 make_llm_api_call 返回 litellm.acompletion 一样
-    return runner.run_async(
+    adk_generator = runner.run_async(
         user_id=user_id,
         session_id=session_id,
         new_message=user_content,
         run_config=run_config
     )
+    
+    logger.info(f"✅ runner.run_async 调用成功，返回异步生成器")
+    return adk_generator
 
 
 # Initialize API keys on module import

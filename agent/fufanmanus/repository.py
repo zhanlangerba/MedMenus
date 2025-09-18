@@ -185,6 +185,8 @@ class FufanmanusAgentRepository:
                 "agent_id": str(uuid.uuid4()),
                 "user_id": user_id,
                 "name": FufanmanusConfig.NAME,
+                "model": FufanmanusConfig.DEFAULT_MODEL,
+                "system_prompt": FufanmanusConfig.SYSTEM_PROMPT,
                 "description": FufanmanusConfig.DESCRIPTION,
                 "is_default": True,
                 "avatar": FufanmanusConfig.AVATAR,
@@ -206,10 +208,10 @@ class FufanmanusAgentRepository:
                     agent_id=agent_id,
                     user_id=user_id,
                     system_prompt="[MANAGED]",
-                                model=FufanmanusConfig.DEFAULT_MODEL,
-            configured_mcps=FufanmanusConfig.DEFAULT_MCPS,
-            custom_mcps=FufanmanusConfig.DEFAULT_CUSTOM_MCPS,
-            agentpress_tools=FufanmanusConfig.DEFAULT_TOOLS
+                    model=FufanmanusConfig.DEFAULT_MODEL,
+                    configured_mcps=FufanmanusConfig.DEFAULT_MCPS,
+                    custom_mcps=FufanmanusConfig.DEFAULT_CUSTOM_MCPS,
+                    agentpress_tools=FufanmanusConfig.DEFAULT_TOOLS
                 )
                 return agent_id
             

@@ -7,7 +7,7 @@ class FufanmanusConfig:
     DESCRIPTION = "FuFanManus is your AI assistant with access to various tools and integrations to help you with tasks across domains."
     AVATAR = "🌞"
     AVATAR_COLOR = "#F59E0B"
-    DEFAULT_MODEL = "anthropic/claude-sonnet-4-20250514"
+    DEFAULT_MODEL = "DeepSeek/DeepSeek-chat"
     SYSTEM_PROMPT = SYSTEM_PROMPT
 
     DEFAULT_TOOLS = {

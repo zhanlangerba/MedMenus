@@ -31,7 +31,7 @@ from agent import api as agent_api
 from sandbox import api as sandbox_api
 # from services import transcription as transcription_api
 # from services import api_keys_api
-
+from utils.simple_auth_middleware import get_current_user_id_from_jwt
 # 强制 asyncio 使用 Proactor 事件循环，以确保异步 I/O 的兼容性和稳定性。
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
@@ -153,7 +153,8 @@ async def options_handler(path: str):
 
 # 包含认证路由
 from auth.api import router as auth_router
-from utils.simple_auth_middleware import get_current_user_id_from_jwt
+
+# 用户认证管理模块
 api_router.include_router(auth_router)
 
 # Include feature flags router

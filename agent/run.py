@@ -599,17 +599,7 @@ class AgentRunner:
         while continue_execution and iteration_count < self.config.max_iterations:
             iteration_count += 1          
             logger.info(f"Looping：continue_execution={continue_execution}, iteration_count={iteration_count}, max_iterations={self.config.max_iterations}")
-            
-            # can_run, message, subscription = await check_billing_status(self.client, self.account_id)
-            # if not can_run:
-            #     error_msg = f"Billing limit reached: {message}"
-            #     yield {
-            #         "type": "status",
-            #         "status": "stopped",
-            #         "message": error_msg
-            #     }
-            #     break
-
+        
             temporary_message = await message_manager.build_temporary_message()
             logger.info(f"temporary_message created successfully: {temporary_message}")
             # max_tokens = self.get_max_tokens()

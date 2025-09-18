@@ -15,7 +15,7 @@ from .models import (
 )
 
 class AuthService:
-    """用户认证服务"""
+    """User Authentication Service"""
     
     def __init__(self):
         self.db = DBConnection()
@@ -37,7 +37,7 @@ class AuthService:
         )
     
     async def register(self, request: RegisterRequest) -> AuthResponse:
-        """用户注册（适配Google ADK）"""
+        """User Registration"""
         logger.info(f"Starting registration for: {request.email}")
         
         client = await self._get_client()
@@ -85,25 +85,16 @@ class AuthService:
         app_name = self.default_app_name
         
         # 创建注册会话（注册时先创建会话，再记录事件，用来适配ADK框架中无法使用session_id字段的情况）
-        session_id = await self._create_adk_session(client, str(user['id']), {
+        await self._create_adk_session(client, str(user['id']), {
             'registration_time': datetime.now().isoformat(),
             'registration_method': 'email_password',
             'status': 'active'
         }, app_name)
         
-        # 🗑️ 移除：不再记录注册事件到events表，sessions表已经足够
-        # if session_id:
-        #     await self._log_adk_event(client, str(user['id']), 'user_register', {
-        #         'email': request.email,
-        #         'name': request.name,
-        #         'provider': 'local',
-        #         'registration_time': datetime.now().isoformat()
-        #     }, session_id, app_name)
-        # else:
-        #     logger.warning(f"Skipping registration event log due to failed session creation for user {user['id']}")
-        
-        # 🆕 创建默认Agent
-        await self._create_default_agent(client, str(user['id']))
+        # 注册时创建FuFanManus Agent
+        from agent.fufanmanus.repository import FufanmanusAgentRepository
+        repository = FufanmanusAgentRepository()
+        await repository.create_fufanmanus_agent(str(user['id']))
         
         logger.info(f"User registered: {request.email}")
         
@@ -115,7 +106,7 @@ class AuthService:
         )
     
     async def login(self, request: LoginRequest) -> AuthResponse:
-        """用户登录（适配Google ADK）"""
+        """User login"""
         client = await self._get_client()
         
         # 查找用户（包含ADK状态字段）
@@ -140,11 +131,20 @@ class AuthService:
         if not self.auth.verify_password(request.password, user['password_hash']):
             raise HTTPException(status_code=401, detail="Invalid email or password")
         
-        # 生成tokens
+        # 登录前先清除该用户的所有旧refresh tokens
+        async with client.pool.acquire() as conn:
+            old_tokens_result = await conn.execute(
+                "DELETE FROM refresh_tokens WHERE user_id = $1",
+                str(user['id'])
+            )
+        old_tokens_count = int(old_tokens_result.split()[-1]) if old_tokens_result else 0
+        logger.info(f"Login: Cleared {old_tokens_count} old refresh tokens for user {user['id']}")
+        
+        # 生成新的tokens
         access_token = self.auth.create_access_token(str(user['id']))
         refresh_token = self.auth.create_refresh_token()
         
-        # 存储刷新token
+        # 存储新的刷新token
         await self._store_refresh_token(str(user['id']), refresh_token)
         
         # 更新最后登录时间（ADK兼容）
@@ -221,7 +221,7 @@ class AuthService:
         )
     
     async def get_user(self, user_id: str) -> UserResponse:
-        """获取用户信息"""
+        """Get user info"""
         client = await self._get_client()
         
         async with client.pool.acquire() as conn:
@@ -234,26 +234,34 @@ class AuthService:
         return UserResponse(user=self._user_to_model(user))
     
     async def logout(self, user_id: str, refresh_token: Optional[str] = None):
-        """登出用户"""
+        """Logout user"""
         client = await self._get_client()
         
-        if refresh_token:
-            # 删除特定的刷新token
-            token_hash = self.auth.hash_refresh_token(refresh_token)
-            async with client.pool.acquire() as conn:
-                await conn.execute(
-                    "DELETE FROM refresh_tokens WHERE token_hash = $1",
-                    token_hash
-                )
-        else:
-            # 删除用户的所有刷新token
-            async with client.pool.acquire() as conn:
-                await conn.execute(
-                    "DELETE FROM refresh_tokens WHERE user_id = $1",
-                    user_id
-                )
+        # 1. 删除refresh tokens (建议删除所有，避免token不一致问题)
+        async with client.pool.acquire() as conn:
+            result = await conn.execute(
+                "DELETE FROM refresh_tokens WHERE user_id = $1",
+                user_id
+            )
         
-        logger.info(f"User logged out: {user_id}")
+        # 提取删除的行数
+        deleted_count = int(result.split()[-1]) if result else 0
+        logger.info(f"Deleted {deleted_count} refresh tokens for user {user_id}")
+        
+        # 2. 更新用户状态为 'offline'
+        await self._update_user_state(client, user_id, {
+            'status': 'offline',
+            'logout_time': datetime.now().isoformat(),
+            'last_activity': datetime.now().isoformat()
+        }, self.default_app_name)
+        
+        # 3. 关闭用户的所有活跃ADK sessions
+        await self._close_user_sessions(client, user_id, self.default_app_name)
+        
+        # 4. 记录logout事件到ADK
+        await self._log_logout_event(client, user_id, self.default_app_name)
+        
+        logger.info(f"User logged out completely: {user_id}")
     
     async def _store_refresh_token(self, user_id: str, refresh_token: str):
         """存储刷新token"""
@@ -272,7 +280,7 @@ class AuthService:
             )
     
     async def _update_user_state(self, client, user_id: str, state_data: dict, app_name: str = "fufanmanus"):
-        """更新Google ADK用户状态"""
+        """Update user state"""
         try:
             # 检查是否已存在用户状态
             async with client.pool.acquire() as conn:
@@ -319,7 +327,7 @@ class AuthService:
             logger.warning(f"Failed to update user state: {e}")
     
     async def _create_adk_session(self, client, user_id: str, session_data: dict, app_name: str = "fufanmanus"):
-        """创建Google ADK会话"""
+        """Create ADK session"""
         try:
             # 生成会话ID
             import uuid
@@ -466,68 +474,55 @@ class AuthService:
             except Exception as e:
                 logger.warning(f"Failed to parse agent session state: {e}")
         
-        return agents 
+        return agents
 
-    async def _create_default_agent(self, client, user_id: str):
-        """为新用户创建默认Agent"""
+    async def _close_user_sessions(self, client, user_id: str, app_name: str = "fufanmanus"):
+        """Close all active ADK sessions for a user"""
         try:
-            import uuid
-            agent_id = str(uuid.uuid4())
-            
-            # 默认Agent配置
-            default_agent_data = {
-                'agent_id': agent_id,
-                'user_id': user_id,
-                'name': 'Default Assistant',
-                'description': '你的默认AI助手，可以帮助你完成各种任务',
-                'system_prompt': '你是一个智能助手，能够帮助用户解决各种问题。请以友好、专业的方式回答用户的问题。',
-                'model': 'deepseek/deepseek-chat-v3.1',
-                'configured_mcps': [],
-                'custom_mcps': [],
-                'agentpress_tools': {},
-                'is_default': True,
-                'is_public': False,
-                'tags': [],
-                'avatar': None,
-                'avatar_color': '#4F46E5',
-                'profile_image_url': None,
-                'current_version_id': None,
-                'version_count': 1,
-                'metadata': {
-                    'created_by': 'system',
-                    'auto_created': True
-                },
-                'created_at': datetime.now(),
-                'updated_at': datetime.now()
-            }
-            
-            # 插入到agents表
+            # 更新所有该用户的sessions状态为closed
             async with client.pool.acquire() as conn:
-                await conn.execute(
+                result = await conn.execute(
                     """
-                    INSERT INTO agents (
-                        agent_id, user_id, name, description, system_prompt, model,
-                        configured_mcps, custom_mcps, agentpress_tools, is_default, is_public,
-                        tags, avatar, avatar_color, profile_image_url, current_version_id,
-                        version_count, metadata, created_at, updated_at
-                    ) VALUES (
-                        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20
-                    )
+                    UPDATE sessions 
+                    SET state = jsonb_set(COALESCE(state, '{}'), '{status}', '"closed"'),
+                        update_time = $1
+                    WHERE app_name = $2 AND user_id = $3 
+                    AND (state->>'status' IS NULL OR state->>'status' != 'closed')
                     """,
-                    agent_id, user_id, default_agent_data['name'], default_agent_data['description'],
-                    default_agent_data['system_prompt'], default_agent_data['model'],
-                    json.dumps(default_agent_data['configured_mcps']), json.dumps(default_agent_data['custom_mcps']),
-                    json.dumps(default_agent_data['agentpress_tools']), default_agent_data['is_default'],
-                    default_agent_data['is_public'], default_agent_data['tags'], default_agent_data['avatar'],
-                    default_agent_data['avatar_color'], default_agent_data['profile_image_url'],
-                    default_agent_data['current_version_id'], default_agent_data['version_count'],
-                    json.dumps(default_agent_data['metadata']), default_agent_data['created_at'],
-                    default_agent_data['updated_at']
+                    datetime.now(), app_name, user_id
                 )
-            
-            logger.info(f"Created default agent {agent_id} for user {user_id}")
-            return agent_id
+                
+            closed_count = int(result.split()[-1]) if result else 0
+            logger.info(f"Closed {closed_count} ADK sessions for user {user_id}")
             
         except Exception as e:
-            logger.error(f"Failed to create default agent for user {user_id}: {e}")
-            return None 
+            logger.warning(f"Failed to close user sessions: {e}")
+    
+    async def _log_logout_event(self, client, user_id: str, app_name: str = "fufanmanus"):
+        """Log logout event to ADK"""
+        try:
+            # 尝试找到最近的活跃session来记录logout事件
+            async with client.pool.acquire() as conn:
+                recent_session = await conn.fetchrow(
+                    """
+                    SELECT id FROM sessions 
+                    WHERE app_name = $1 AND user_id = $2 
+                    ORDER BY update_time DESC 
+                    LIMIT 1
+                    """,
+                    app_name, user_id
+                )
+            
+            session_id = recent_session['id'] if recent_session else None
+            
+            logout_data = {
+                'event_type': 'user_logout',
+                'logout_time': datetime.now().isoformat(),
+                'reason': 'user_initiated'
+            }
+            
+            await self._log_adk_event(client, user_id, "logout", logout_data, 
+                                    session_id, app_name)
+                                    
+        except Exception as e:
+            logger.warning(f"Failed to log logout event: {e}")

@@ -1309,7 +1309,7 @@ import datetime
 #   """
 
 SYSTEM_PROMPT = """
-You are Suna, a helpful assistant. You are able to use tools to help you complete tasks.
+You are FuFanManus, a helpful assistant. You are able to use tools to help you complete tasks.
 - test_calculator: A tool that can perform basic mathematical operations.
 """
 

@@ -14,21 +14,19 @@ from utils.config import config
 from utils.logger import logger
 
 class AuthUtils:
-    """专业的JWT认证工具"""
+    """JWT Authentication Utilities"""
     
     # JWT配置
+    # 生产配置：这里需要 使用加密安全的随机生成器生成，可以通过环境变量或者外部服务管理秘钥，并做定期轮换
+    # 硬编码仅使用课程演示环境或者研发测试环境
     JWT_SECRET = getattr(config, 'JWT_SECRET_KEY', 'your-secret-key-change-in-production')
     ACCESS_TOKEN_EXPIRE_HOURS = 24  # 普通接口访问携带的token过期时间为24小时
     REFRESH_TOKEN_EXPIRE_DAYS = 30  # 刷新token过期时间为30天
     
     @classmethod
     def initialize(cls):
-        """初始化认证工具并记录配置信息"""
-        logger.info(f"AuthUtils initialized with config:")
-        logger.info(f"  - JWT_SECRET: {'*' * 10} (length: {len(cls.JWT_SECRET)})")
-        logger.info(f"  - ACCESS_TOKEN_EXPIRE_HOURS: {cls.ACCESS_TOKEN_EXPIRE_HOURS}")
-        logger.info(f"  - REFRESH_TOKEN_EXPIRE_DAYS: {cls.REFRESH_TOKEN_EXPIRE_DAYS}")
-        
+        """Initialize authentication tool and record configuration information"""
+
         # 验证JWT密钥
         if cls.JWT_SECRET == 'your-secret-key-change-in-production':
             logger.warning("Using default JWT secret key! Please change in production!")
@@ -37,10 +35,9 @@ class AuthUtils:
     
     @staticmethod
     def hash_password(password: str) -> str:
-        """密码哈希"""
+        """password hashing"""
         try:
             hashed = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
-            logger.info(f"Password hashed successfully, length: {len(hashed)}")
             return hashed
         except Exception as e:
             logger.error(f"Password hashing failed: {e}")
@@ -62,15 +59,29 @@ class AuthUtils:
     
     @staticmethod
     def create_access_token(user_id: str) -> str:
-        """创建访问token"""
+        """Create access token
+        
+        # 传统Session方式（有状态）
+        # 服务器需要存储每个用户的登录状态
+        sessions = {
+            "session_123": {"user_id": "user_456", "login_time": "2024-01-01"}
+        }
+
+        # JWT方式（无状态）
+        # 所有信息都编码在token中，服务器无需存储状态
+        token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+        
+        """
         try:
             expire = datetime.now(timezone.utc) + timedelta(hours=AuthUtils.ACCESS_TOKEN_EXPIRE_HOURS)
             payload = {
-                "sub": user_id,
-                "exp": expire,
-                "iat": datetime.now(timezone.utc),
-                "type": "access"
+                "sub": user_id,   # Subject - 主题(用户ID)
+                "exp": expire,    # Expiration time - 过期时间
+                "iat": datetime.now(timezone.utc),  # Issued at - 发行时间
+                "type": "access"  # Custom - 自定义字段
             }
+
+            # 使用标准HS256算法
             token = jwt.encode(payload, AuthUtils.JWT_SECRET, algorithm="HS256")
             logger.info(f"Created access token for user {user_id}, expires at {expire}")
             return token
@@ -80,7 +91,13 @@ class AuthUtils:
     
     @staticmethod
     def create_refresh_token() -> str:
-        """创建刷新token"""
+        """Create refresh token
+        Access Token过期时 或者 前端自动请求刷新token时触发
+        1. 验证refresh_token是否有效
+        2. 删除旧的refresh_token  
+        3. 生成新的access_token和refresh_token
+        4. 返回新的token对
+        """
         try:
             token = secrets.token_urlsafe(32)
             logger.info(f"Created refresh token: {token[:8]}...")
@@ -91,20 +108,29 @@ class AuthUtils:
     
     @staticmethod
     def verify_token(token: str) -> Dict[str, Any]:
-        """验证token"""
+        """Verify token"""
         try:
             logger.debug(f"Verifying token: {token[:10]}...")
+
+            # Step 1: JWT结构验证和签名验证
             payload = jwt.decode(token, AuthUtils.JWT_SECRET, algorithms=["HS256"])
+            
+            # Step 2: 检查必需字段
             user_id = payload.get("sub")
             if not user_id:
                 logger.warning(f"Token verification failed: missing user_id in payload")
                 raise HTTPException(status_code=401, detail="Invalid token")
             logger.info(f"Token verified successfully for user {user_id}")
+
+            # Step 3: 自动检查过期时间（jwt.decode会自动检查exp字段）
+            # 如果过期会抛出jwt.ExpiredSignatureError
             return {"user_id": user_id, "payload": payload}
         except jwt.ExpiredSignatureError:
+            # Token过期
             logger.warning(f"Token verification failed: token expired")
             raise HTTPException(status_code=401, detail="Token expired")
         except jwt.InvalidTokenError:
+            # Token无效
             logger.warning(f"Token verification failed: invalid token")
             raise HTTPException(status_code=401, detail="Invalid token")
         except Exception as e:
@@ -113,7 +139,7 @@ class AuthUtils:
     
     @staticmethod
     def hash_refresh_token(token: str) -> str:
-        """哈希刷新token"""
+        """hash refresh token"""
         try:
             hashed = hashlib.sha256(token.encode()).hexdigest()
             logger.debug(f"Refresh token hashed: {hashed[:8]}...")
@@ -124,7 +150,7 @@ class AuthUtils:
     
     @staticmethod
     def get_refresh_token_expire_time() -> datetime:
-        """获取刷新token过期时间"""
+        """get refresh token expire time"""
         try:
             expire_time = datetime.now(timezone.utc) + timedelta(days=AuthUtils.REFRESH_TOKEN_EXPIRE_DAYS)
             logger.debug(f"Refresh token expire time calculated: {expire_time}")
@@ -135,7 +161,7 @@ class AuthUtils:
     
     @staticmethod
     def is_token_expired(token: str) -> bool:
-        """检查token是否过期"""
+        """check token is expired"""
         try:
             logger.debug(f"Checking token expiration: {token[:10]}...")
             payload = jwt.decode(token, AuthUtils.JWT_SECRET, algorithms=["HS256"])
@@ -156,17 +182,17 @@ class AuthUtils:
     @staticmethod
     async def get_account_id_from_thread(client, thread_id: str) -> str:
         """
-        根据线程ID获取账户ID
+        Get account ID from thread ID
         
         Args:
-            client: 数据库客户端
-            thread_id: 线程ID
+            client: database client
+            thread_id: thread ID
             
         Returns:
-            str: 账户ID
+            str: USER ID
             
         Raises:
-            HTTPException: 如果线程不存在
+            HTTPException: if thread not found
         """
         try:
             thread_result = await client.table('threads').select('account_id').eq('thread_id', thread_id).execute()

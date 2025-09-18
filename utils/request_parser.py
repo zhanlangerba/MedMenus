@@ -9,13 +9,13 @@ from utils.logger import logger
 
 async def parse_request_data(request: Request) -> Dict[str, Any]:
     """
-    解析请求数据，支持多种格式
+    Parse request data, support multiple formats
     
     Args:
-        request: FastAPI请求对象
+        request: FastAPI request object
     
     Returns:
-        解析后的数据字典
+        Parsed data dictionary
     """
     result = {}
     
@@ -77,13 +77,13 @@ async def parse_request_data(request: Request) -> Dict[str, Any]:
 
 def extract_auth_data(data: Dict[str, Any]) -> Dict[str, Optional[str]]:
     """
-    从解析的数据中提取认证信息
+    Extract authentication information from parsed data
     
     Args:
-        data: 解析后的请求数据字典
+        data: Parsed request data dictionary
     
     Returns:
-        包含认证信息的字典
+        Dictionary containing authentication information
     """
     email = None
     password = None
