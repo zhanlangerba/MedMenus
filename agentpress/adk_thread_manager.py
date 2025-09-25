@@ -351,9 +351,6 @@ class ADKThreadManager:
                     from services.llm import make_adk_api_call
                     
                     tool_functions = available_functions
-                    logger.info(f"📋 ADK工具函数列表: {list(tool_functions.keys()) if tool_functions else []}")
-
-                    logger.info(f"Before make_adk_api_call, tool_functions: {tool_functions}")
                     # 将构建好的提示词实际发送到大模型中                    
                     llm_response = await make_adk_api_call(
                         prepared_messages, 

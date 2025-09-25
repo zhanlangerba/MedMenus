@@ -47,7 +47,7 @@ async def clear_all_tables():
             logger.info(f"  - {table['tablename']}")
         
         # 确认操作
-        print("\n⚠️  警告：这将清空所有表的数据！")
+        print("\n警告：这将清空所有表的数据！")
         confirm = input("请输入 'YES' 确认继续，或按回车取消: ")
         
         if confirm != 'YES':
@@ -73,20 +73,20 @@ async def clear_all_tables():
                     # 清空表
                     await conn.execute(f"TRUNCATE TABLE {table_name} RESTART IDENTITY CASCADE;")
                 
-                logger.info(f"✅ 已清空表 {table_name} ({row_count} 行数据)")
+                logger.info(f"已清空表 {table_name} ({row_count} 行数据)")
                 cleared_count += 1
                 
             except Exception as e:
-                logger.error(f"❌ 清空表 {table_name} 失败: {e}")
+                logger.error(f"清空表 {table_name} 失败: {e}")
         
         # 重新启用外键约束检查
         async with client.pool.acquire() as conn:
             await conn.execute("SET session_replication_role = DEFAULT;")
         
-        logger.info(f"\n🎉 操作完成！成功清空了 {cleared_count} 个表的数据")
+        logger.info(f"\n操作完成！成功清空了 {cleared_count} 个表的数据")
         
         # 验证清空结果
-        print("\n📊 清空后的表状态:")
+        print("\n清空后的表状态:")
         for table in tables:
             table_name = table['tablename']
             try:
@@ -95,10 +95,10 @@ async def clear_all_tables():
                         f"SELECT COUNT(*) as count FROM {table_name}"
                     )
                     row_count = count_result['count'] if count_result else 0
-                    status = "✅ 已清空" if row_count == 0 else f"❌ 仍有 {row_count} 行数据"
+                    status = "已清空" if row_count == 0 else f"仍有 {row_count} 行数据"
                     print(f"  {table_name}: {status}")
             except Exception as e:
-                print(f"  {table_name}: ❌ 检查失败 - {e}")
+                print(f"  {table_name}: 检查失败 - {e}")
         
     except Exception as e:
         logger.error(f"清空表数据时发生错误: {e}")
@@ -121,7 +121,7 @@ async def clear_specific_tables(table_names: list):
         logger.info(f"准备清空以下表: {', '.join(table_names)}")
         
         # 确认操作
-        print(f"\n⚠️  警告：这将清空表 {', '.join(table_names)} 的数据！")
+        print(f"\n警告：这将清空表 {', '.join(table_names)} 的数据！")
         confirm = input("请输入 'YES' 确认继续，或按回车取消: ")
         
         if confirm != 'YES':
@@ -155,17 +155,17 @@ async def clear_specific_tables(table_names: list):
                     # 清空表
                     await conn.execute(f"TRUNCATE TABLE {table_name} RESTART IDENTITY CASCADE;")
                 
-                logger.info(f"✅ 已清空表 {table_name} ({row_count} 行数据)")
+                logger.info(f"已清空表 {table_name} ({row_count} 行数据)")
                 cleared_count += 1
                 
             except Exception as e:
-                logger.error(f"❌ 清空表 {table_name} 失败: {e}")
+                logger.error(f"清空表 {table_name} 失败: {e}")
         
         # 重新启用外键约束检查
         async with client.pool.acquire() as conn:
             await conn.execute("SET session_replication_role = DEFAULT;")
         
-        logger.info(f"\n🎉 操作完成！成功清空了 {cleared_count} 个表的数据")
+        logger.info(f"\n操作完成！成功清空了 {cleared_count} 个表的数据")
         
     except Exception as e:
         logger.error(f"清空表数据时发生错误: {e}")

@@ -1,10 +1,10 @@
 from tavily import AsyncTavilyClient
 import httpx
 from dotenv import load_dotenv
-from agentpress.tool import Tool, ToolResult, openapi_schema, usage_example
+from agentpress.tool import ToolResult
 from utils.config import config
 from sandbox.tool_base import SandboxToolsBase
-from agentpress.thread_manager import ADKThreadManager
+from agentpress.adk_thread_manager import ADKThreadManager
 import json
 import os
 import datetime
@@ -18,9 +18,9 @@ class SandboxWebSearchTool(SandboxToolsBase):
 
     def __init__(self, project_id: str, thread_manager: ADKThreadManager):
         super().__init__(project_id, thread_manager)
-        # Load environment variables
-        load_dotenv()
-        # Use API keys from config
+        # 加载当前的环境变量，覆盖默认的环境变量
+        load_dotenv(override=True)
+    
         self.tavily_api_key = config.TAVILY_API_KEY
         self.firecrawl_api_key = config.FIRECRAWL_API_KEY
         self.firecrawl_url = config.FIRECRAWL_URL
@@ -30,61 +30,54 @@ class SandboxWebSearchTool(SandboxToolsBase):
         if not self.firecrawl_api_key:
             raise ValueError("FIRECRAWL_API_KEY not found in configuration")
 
-        # Tavily asynchronous search client
+        # 获取 Tavily 的异步搜索客户端
         self.tavily_client = AsyncTavilyClient(api_key=self.tavily_api_key)
 
-    @openapi_schema({
-        "type": "function",
-        "function": {
-            "name": "web_search",
-            "description": "Search the web for up-to-date information on a specific topic using the Tavily API. This tool allows you to gather real-time information from the internet to answer user queries, research topics, validate facts, and find recent developments. Results include titles, URLs, and publication dates. Use this tool for discovering relevant web pages before potentially crawling them for complete content.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "The search query to find relevant web pages. Be specific and include key terms to improve search accuracy. For best results, use natural language questions or keyword combinations that precisely describe what you're looking for."
-                    },
-                    "num_results": {
-                        "type": "integer",
-                        "description": "The number of search results to return. Increase for more comprehensive research or decrease for focused, high-relevance results.",
-                        "default": 20
-                    }
-                },
-                "required": ["query"]
-            }
-        }
-    })
-    @usage_example('''
-        <function_calls>
-        <invoke name="web_search">
-        <parameter name="query">what is Kortix AI and what are they building?</parameter>
-        <parameter name="num_results">20</parameter>
-        </invoke>
-        </function_calls>
-        
-        <!-- Another search example -->
-        <function_calls>
-        <invoke name="web_search">
-        <parameter name="query">latest AI research on transformer models</parameter>
-        <parameter name="num_results">20</parameter>
-        </invoke>
-        </function_calls>
-        ''')
     async def web_search(
         self, 
         query: str,
         num_results: int = 20
     ) -> ToolResult:
         """
-        Search the web using the Tavily API to find relevant and up-to-date information.
+        Search the web for up-to-date information on a specific topic using the Tavily API.
+        
+        This tool allows you to gather real-time information from the internet to answer user queries, 
+        research topics, validate facts, and find recent developments. Results include titles, URLs, 
+        and publication dates. Use this tool for discovering relevant web pages before potentially 
+        crawling them for complete content.
+        
+        Usage Examples:
+            <function_calls>
+            <invoke name="web_search">
+            <parameter name="query">what is Kortix AI and what are they building?</parameter>
+            <parameter name="num_results">20</parameter>
+            </invoke>
+            </function_calls>
+            
+            <!-- Another search example -->
+            <function_calls>
+            <invoke name="web_search">
+            <parameter name="query">latest AI research on transformer models</parameter>
+            <parameter name="num_results">20</parameter>
+            </invoke>
+            </function_calls>
+        
+        Args:
+            query: The search query to find relevant web pages. Be specific and include key terms 
+                  to improve search accuracy. For best results, use natural language questions or 
+                  keyword combinations that precisely describe what you're looking for.
+            num_results: The number of search results to return. Increase for more comprehensive 
+                        research or decrease for focused, high-relevance results. Default is 20.
+        
+        Returns:
+            ToolResult: Success with JSON string of search results, or failure with error message.
         """
         try:
-            # Ensure we have a valid query
+            # 确保有一个有效的查询
             if not query or not isinstance(query, str):
                 return self.fail_response("A valid search query is required.")
             
-            # Normalize num_results
+            # 规范化 num_results
             if num_results is None:
                 num_results = 20
             elif isinstance(num_results, int):
@@ -97,7 +90,7 @@ class SandboxWebSearchTool(SandboxToolsBase):
             else:
                 num_results = 20
 
-            # Execute the search with Tavily
+            # 使用 Tavily 执行搜索
             logging.info(f"Executing web search for query: '{query}' with {num_results} results")
             search_response = await self.tavily_client.search(
                 query=query,
@@ -107,22 +100,22 @@ class SandboxWebSearchTool(SandboxToolsBase):
                 search_depth="advanced",
             )
             
-            # Check if we have actual results or an answer
+            # 检查是否实际有结果或答案
             results = search_response.get('results', [])
             answer = search_response.get('answer', '')
             
-            # Return the complete Tavily response 
-            # This includes the query, answer, results, images and more
+            # 返回完整的 Tavily 响应
+            # 这包括查询、答案、结果、图像等
             logging.info(f"Retrieved search results for query: '{query}' with answer and {len(results)} results")
             
-            # Consider search successful if we have either results OR an answer
+            # 考虑搜索成功，如果结果或答案存在
             if len(results) > 0 or (answer and answer.strip()):
                 return ToolResult(
                     success=True,
                     output=json.dumps(search_response, ensure_ascii=False)
                 )
             else:
-                # No results or answer found
+                # 没有结果或答案找到
                 logging.warning(f"No search results or answer found for query: '{query}'")
                 return ToolResult(
                     success=False,
@@ -137,42 +130,35 @@ class SandboxWebSearchTool(SandboxToolsBase):
                 simplified_message += "..."
             return self.fail_response(simplified_message)
 
-    @openapi_schema({
-        "type": "function",
-        "function": {
-            "name": "scrape_webpage",
-            "description": "Extract full text content from multiple webpages in a single operation. IMPORTANT: You should ALWAYS collect multiple relevant URLs from web-search results and scrape them all in a single call for efficiency. This tool saves time by processing multiple pages simultaneously rather than one at a time. The extracted text includes the main content of each page without HTML markup.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "urls": {
-                        "type": "string",
-                        "description": "Multiple URLs to scrape, separated by commas. You should ALWAYS include several URLs when possible for efficiency. Example: 'https://example.com/page1,https://example.com/page2,https://example.com/page3'"
-                    }
-                },
-                "required": ["urls"]
-            }
-        }
-    })
-    @usage_example('''
-        <function_calls>
-        <invoke name="scrape_webpage">
-        <parameter name="urls">https://www.kortix.ai/,https://github.com/kortix-ai/suna</parameter>
-        </invoke>
-        </function_calls>
-        ''')
     async def scrape_webpage(
         self,
         urls: str
     ) -> ToolResult:
         """
-        Retrieve the complete text content of multiple webpages in a single efficient operation.
+        Extract full text content from multiple webpages in a single operation.
+        
+        IMPORTANT: You should ALWAYS collect multiple relevant URLs from web-search results and 
+        scrape them all in a single call for efficiency. This tool saves time by processing 
+        multiple pages simultaneously rather than one at a time. The extracted text includes 
+        the main content of each page without HTML markup.
         
         ALWAYS collect multiple relevant URLs from search results and scrape them all at once
         rather than making separate calls for each URL. This is much more efficient.
         
-        Parameters:
-        - urls: Multiple URLs to scrape, separated by commas
+        Usage Example:
+            <function_calls>
+            <invoke name="scrape_webpage">
+            <parameter name="urls">https://www.kortix.ai/,https://github.com/kortix-ai/suna</parameter>
+            </invoke>
+            </function_calls>
+        
+        Args:
+            urls: Multiple URLs to scrape, separated by commas. You should ALWAYS include several 
+                 URLs when possible for efficiency. 
+                 Example: 'https://example.com/page1,https://example.com/page2,https://example.com/page3'
+        
+        Returns:
+            ToolResult: Success with message about scraped content and file paths, or failure with error message.
         """
         try:
             logging.info(f"Starting to scrape webpages: {urls}")
@@ -367,21 +353,3 @@ class SandboxWebSearchTool(SandboxToolsBase):
                 "success": False,
                 "error": error_message
             }
-
-if __name__ == "__main__":
-    async def test_web_search():
-        """Test function for the web search tool"""
-        # This test function is not compatible with the sandbox version
-        print("Test function needs to be updated for sandbox version")
-    
-    async def test_scrape_webpage():
-        """Test function for the webpage scrape tool"""
-        # This test function is not compatible with the sandbox version
-        print("Test function needs to be updated for sandbox version")
-    
-    async def run_tests():
-        """Run all test functions"""
-        await test_web_search()
-        await test_scrape_webpage()
-        
-    asyncio.run(run_tests())

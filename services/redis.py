@@ -1,5 +1,28 @@
 """
 Redis connection service - asyncio version
+
+前端请求 → 后端API → 启动Agent后台进程
+                ↓
+         创建Redis Keys:
+         - response_list_key (存储响应)
+         - response_channel (通知频道)
+                ↓
+    Agent开始运行，每产生一个响应:
+    1. rpush(response_list_key, response)  ← 存储数据
+    2. publish(response_channel, "new")    ← 发送通知
+                ↓
+    前端API订阅response_channel:
+    1. 收到"new"通知
+    2. lrange(response_list_key, last_index, -1)  ← 获取新数据
+    3. 立即返回给前端渲染
+
+await redis.rpush("my_list", "item1")
+await redis.rpush("my_list", "item2") 
+await redis.rpush("my_list", "item3")
+
+# 结果：["item1", "item2", "item3"]
+#        ↑                    ↑
+#      左侧(头)             右侧(尾)
 """
 
 import redis.asyncio as redis # type: ignore

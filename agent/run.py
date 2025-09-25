@@ -10,7 +10,7 @@ import traceback
 from agent.tools.message_tool import MessageTool
 # from agent.tools.sb_deploy_tool import SandboxDeployTool
 # from agent.tools.sb_expose_tool import SandboxExposeTool
-# from agent.tools.web_search_tool import SandboxWebSearchTool
+# from agent.tools.sandbox_web_search_tool import SandboxWebSearchTool
 from dotenv import load_dotenv # type: ignore
 from utils.config import config
 # from agent.agent_builder_prompt import get_agent_builder_prompt
@@ -75,7 +75,7 @@ class ToolManager:
         self.thread_id = thread_id
     
     def register_all_tools(self):
-        # 🧪 测试现有工具注册流程
+        # 测试现有工具注册流程
         logger.info("我现在开始加载工具！！！！")
         from agent.tools.simple_test_tool import SimpleTestTool
         self.thread_manager.add_tool(SimpleTestTool)
@@ -84,6 +84,9 @@ class ToolManager:
         self.thread_manager.add_tool(TaskListTool, project_id=self.project_id, thread_manager=self.thread_manager, thread_id=self.thread_id)
         logger.info("Successfully registered task list tool: TaskListTool (with enhanced registry)")
         
+        # from agent.tools.sandbox_web_search_tool import SandboxWebSearchTool
+        # self.thread_manager.add_tool(SandboxWebSearchTool, project_id=self.project_id, thread_manager=self.thread_manager)
+
         # self.thread_manager.add_tool(SandboxShellTool, project_id=self.project_id, thread_manager=self.thread_manager)
         # self.thread_manager.add_tool(SandboxFilesTool, project_id=self.project_id, thread_manager=self.thread_manager)
         # self.thread_manager.add_tool(SandboxDeployTool, project_id=self.project_id, thread_manager=self.thread_manager)
@@ -93,7 +96,6 @@ class ToolManager:
         # self.thread_manager.add_tool(SandboxImageEditTool, project_id=self.project_id, thread_id=self.thread_id, thread_manager=self.thread_manager)
         # self.thread_manager.add_tool(SandboxPresentationOutlineTool, project_id=self.project_id, thread_manager=self.thread_manager)
         # self.thread_manager.add_tool(SandboxPresentationToolV2, project_id=self.project_id, thread_manager=self.thread_manager)
-        # self.thread_manager.add_tool(TaskListTool, project_id=self.project_id, thread_manager=self.thread_manager, thread_id=self.thread_id)
         # self.thread_manager.add_tool(SandboxSheetsTool, project_id=self.project_id, thread_manager=self.thread_manager)
         # self.thread_manager.add_tool(SandboxWebDevTool, project_id=self.project_id, thread_id=self.thread_id, thread_manager=self.thread_manager)
         # if config.RAPID_API_KEY:
@@ -845,7 +847,7 @@ class AgentRunner:
             
             if generation:
                 generation.end(output=full_response)
-        logger.info(f"final_all_chunk: {all_chunk}")
+
         asyncio.create_task(asyncio.to_thread(lambda: langfuse.flush()))
         #         if isinstance(response, dict) and "status" in response and response["status"] == "error":
         #             yield response

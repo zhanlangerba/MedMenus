@@ -6,7 +6,7 @@ from utils.simple_auth_middleware import get_current_user_id_from_jwt, get_user_
 from fastapi import FastAPI, UploadFile, File, HTTPException, APIRouter, Form, Depends, Request
 from fastapi.responses import Response
 from pydantic import BaseModel
-from daytona_sdk import AsyncSandbox
+# from daytona_sdk import AsyncSandbox
 
 from sandbox.sandbox import get_or_start_sandbox, delete_sandbox
 from utils.logger import logger
@@ -107,40 +107,40 @@ async def verify_sandbox_access(client, sandbox_id: str, user_id: Optional[str] 
     
     raise HTTPException(status_code=403, detail="Not authorized to access this sandbox")
 
-async def get_sandbox_by_id_safely(client, sandbox_id: str) -> AsyncSandbox:
-    """
-    Safely retrieve a sandbox object by its ID, using the project that owns it.
+# async def get_sandbox_by_id_safely(client, sandbox_id: str) -> AsyncSandbox:
+#     """
+#     Safely retrieve a sandbox object by its ID, using the project that owns it.
     
-    Args:
-        client: The Supabase client
-        sandbox_id: The sandbox ID to retrieve
+#     Args:
+#         client: The Supabase client
+#         sandbox_id: The sandbox ID to retrieve
     
-    Returns:
-        AsyncSandbox: The sandbox object
+#     Returns:
+#         AsyncSandbox: The sandbox object
         
-    Raises:
-        HTTPException: If the sandbox doesn't exist or can't be retrieved
-    """
-    # Find the project that owns this sandbox
-    project_result = await client.table('projects').select('project_id').filter('sandbox->>id', 'eq', sandbox_id).execute()
+#     Raises:
+#         HTTPException: If the sandbox doesn't exist or can't be retrieved
+#     """
+#     # Find the project that owns this sandbox
+#     project_result = await client.table('projects').select('project_id').filter('sandbox->>id', 'eq', sandbox_id).execute()
     
-    if not project_result.data or len(project_result.data) == 0:
-        logger.error(f"No project found for sandbox ID: {sandbox_id}")
-        raise HTTPException(status_code=404, detail="Sandbox not found - no project owns this sandbox ID")
+#     if not project_result.data or len(project_result.data) == 0:
+#         logger.error(f"No project found for sandbox ID: {sandbox_id}")
+#         raise HTTPException(status_code=404, detail="Sandbox not found - no project owns this sandbox ID")
     
-    # project_id = project_result.data[0]['project_id']
-    # logger.debug(f"Found project {project_id} for sandbox {sandbox_id}")
+#     # project_id = project_result.data[0]['project_id']
+#     # logger.debug(f"Found project {project_id} for sandbox {sandbox_id}")
     
-    try:
-        # Get the sandbox
-        sandbox = await get_or_start_sandbox(sandbox_id)
-        # Extract just the sandbox object from the tuple (sandbox, sandbox_id, sandbox_pass)
-        # sandbox = sandbox_tuple[0]
+#     try:
+#         # Get the sandbox
+#         sandbox = await get_or_start_sandbox(sandbox_id)
+#         # Extract just the sandbox object from the tuple (sandbox, sandbox_id, sandbox_pass)
+#         # sandbox = sandbox_tuple[0]
             
-        return sandbox
-    except Exception as e:
-        logger.error(f"Error retrieving sandbox {sandbox_id}: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to retrieve sandbox: {str(e)}")
+#         return sandbox
+#     except Exception as e:
+#         logger.error(f"Error retrieving sandbox {sandbox_id}: {str(e)}")
+#         raise HTTPException(status_code=500, detail=f"Failed to retrieve sandbox: {str(e)}")
 
 @router.post("/sandboxes/{sandbox_id}/files")
 async def create_file(

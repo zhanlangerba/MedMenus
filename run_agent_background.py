@@ -302,13 +302,12 @@ async def run_agent_background(
         async for response in agent_gen:
             response_count += 1
             if stop_signal_received:
-                print(f"  🛑 收到停止信号，停止Agent运行")
                 logger.info(f"Agent run {agent_run_id} stopped by signal.")
                 final_status = "stopped"
                 try:
                     trace.span(name="agent_run_stopped").end(status_message="agent_run_stopped", level="WARNING")
                 except Exception as trace_error:
-                    print(f"  ⚠️ Trace记录失败: {trace_error}")
+                    logger.warning(f"Failed to record trace for agent run {agent_run_id}: {trace_error}")
                 break
 
             # Store response in Redis list and publish notification
@@ -318,179 +317,125 @@ async def run_agent_background(
             total_responses += 1
             
             if total_responses % 10 == 1:  # 每10个响应打印一次进度
-                print(f"  📊 已处理响应数量: {total_responses}")
-                print(f"  📝 当前响应类型: {response.get('type', 'unknown')}")
-                print(f"  📋 待处理Redis操作: {len(pending_redis_operations)}")
+                logger.info(f"Agent run {agent_run_id} has processed {total_responses} responses")
+
 
             # Check for agent-signaled completion or error
             if response.get('type') == 'status':
                  status_val = response.get('status')
-                 print(f"  📋 收到状态消息: {status_val}")
                  if status_val in ['completed', 'failed', 'stopped']:
-                     print(f"  🏁 Agent运行完成，状态: {status_val}")
                      logger.info(f"Agent run {agent_run_id} finished via status message: {status_val}")
                      final_status = status_val
                      if status_val == 'failed' or status_val == 'stopped':
                          error_message = response.get('message', f"Run ended with status: {status_val}")
-                         print(f"  ❌ 错误消息: {error_message}")
                      break
 
-        print(f"🏁 ===== Agent响应流处理完成 =====")
-        print(f"  📊 总响应数量: {total_responses}")
-        print(f"  📋 当前状态: {final_status}")
 
         # If loop finished without explicit completion/error/stop signal, mark as completed
         if final_status == "running":
              final_status = "completed"
              duration = (datetime.now(timezone.utc) - start_time).total_seconds()
-             print(f"  ✅ 自动标记为完成状态，运行时长: {duration:.2f}秒")
              logger.info(f"Agent run {agent_run_id} completed normally (duration: {duration:.2f}s, responses: {total_responses})")
              completion_message = {"type": "status", "status": "completed", "message": "Agent run completed successfully"}
              # trace.span(name="agent_run_completed").end(status_message="agent_run_completed")
              await redis.rpush(response_list_key, json.dumps(completion_message))
              await redis.publish(response_channel, "new") # Notify about the completion message
-             print(f"  ✅ 完成消息已发布到Redis")
 
-        print(f"📊 ===== 获取最终响应并更新数据库 =====")
         # Fetch final responses from Redis for DB update
-        print(f"  🔄 从Redis获取最终响应...")
         all_responses_json = await redis.lrange(response_list_key, 0, -1)
         all_responses = [json.loads(r) for r in all_responses_json]
-        print(f"  ✅ 获取到 {len(all_responses)} 个最终响应")
 
         # Update DB status
-        print(f"  🔄 更新数据库状态为: {final_status}")
         await update_agent_run_status(client, agent_run_id, final_status, error=error_message)
-        print(f"  ✅ 数据库状态更新完成")
 
-        print(f"📡 ===== 发布最终控制信号 =====")
         # Publish final control signal (END_STREAM or ERROR)
         control_signal = "END_STREAM" if final_status == "completed" else "ERROR" if final_status == "failed" else "STOP"
-        print(f"  📋 控制信号: {control_signal}")
-        print(f"  📡 发布频道: {global_control_channel}")
         
         try:
             await redis.publish(global_control_channel, control_signal)
             # No need to publish to instance channel as the run is ending on this instance
-            print(f"  ✅ 控制信号发布成功")
             logger.debug(f"Published final control signal '{control_signal}' to {global_control_channel}")
         except Exception as e:
-            print(f"  ❌ 控制信号发布失败: {str(e)}")
             logger.warning(f"Failed to publish final control signal {control_signal}: {str(e)}")
 
     except Exception as e:
         error_message = str(e)
         traceback_str = traceback.format_exc()
         duration = (datetime.now(timezone.utc) - start_time).total_seconds()
-        
-        print(f"❌ ===== Agent运行发生错误 =====")
-        print(f"  ⏱️ 运行时长: {duration:.2f}秒")
-        print(f"  💥 错误消息: {error_message}")
-        print(f"  📋 错误详情: {traceback_str}")
+
         
         logger.error(f"Error in agent run {agent_run_id} after {duration:.2f}s: {error_message}\n{traceback_str} (Instance: {instance_id})")
         final_status = "failed"
         try:
             trace.span(name="agent_run_failed").end(status_message=error_message, level="ERROR")
         except Exception as trace_error:
-            print(f"  ⚠️ Trace记录失败: {trace_error}")
+            logger.warning(f"Trace记录失败: {trace_error}")
 
-        print(f"📤 ===== 推送错误响应到Redis =====")
         # Push error message to Redis list
         error_response = {"type": "status", "status": "error", "message": error_message}
         try:
             await redis.rpush(response_list_key, json.dumps(error_response))
             await redis.publish(response_channel, "new")
-            print(f"  ✅ 错误响应推送成功")
         except Exception as redis_err:
-             print(f"  ❌ 错误响应推送失败: {redis_err}")
              logger.error(f"Failed to push error response to Redis for {agent_run_id}: {redis_err}")
 
-        print(f"📥 ===== 获取错误后的响应 =====")
         # Fetch final responses (including the error)
         all_responses = []
         try:
              all_responses_json = await redis.lrange(response_list_key, 0, -1)
              all_responses = [json.loads(r) for r in all_responses_json]
-             print(f"  ✅ 获取到 {len(all_responses)} 个错误后的响应")
         except Exception as fetch_err:
-             print(f"  ❌ 获取响应失败: {fetch_err}")
              logger.error(f"Failed to fetch responses from Redis after error for {agent_run_id}: {fetch_err}")
              all_responses = [error_response] # Use the error message we tried to push
 
-        print(f"💾 ===== 更新数据库错误状态 =====")
         # Update DB status
         await update_agent_run_status(client, agent_run_id, "failed", error=f"{error_message}\n{traceback_str}")
-        print(f"  ✅ 数据库错误状态更新完成")
 
-        print(f"📡 ===== 发布ERROR信号 =====")
         # Publish ERROR signal
         try:
             await redis.publish(global_control_channel, "ERROR")
-            print(f"  ✅ ERROR信号发布成功")
             logger.debug(f"Published ERROR signal to {global_control_channel}")
         except Exception as e:
-            print(f"  ❌ ERROR信号发布失败: {str(e)}")
             logger.warning(f"Failed to publish ERROR signal: {str(e)}")
 
     finally:
       
-        
-        print(f"  🛑 清理停止检查器任务...")
-        # Cleanup stop checker task
+            # Cleanup stop checker task
         if stop_checker and not stop_checker.done():
             stop_checker.cancel()
             try: 
                 await stop_checker
-                print(f"    ✅ 停止检查器任务取消成功")
             except asyncio.CancelledError: 
-                print(f"    ✅ 停止检查器任务已取消")
                 pass
             except Exception as e: 
-                print(f"    ⚠️ 停止检查器任务取消时出错: {e}")
                 logger.warning(f"Error during stop_checker cancellation: {e}")
 
-        print(f"  📡 关闭PubSub连接...")
         # Close pubsub connection
         if pubsub:
             try:
                 await pubsub.unsubscribe()
                 await pubsub.close()
-                print(f"    ✅ PubSub连接关闭成功")
                 logger.debug(f"Closed pubsub connection for {agent_run_id}")
             except Exception as e:
-                print(f"    ⚠️ 关闭PubSub连接时出错: {str(e)}")
                 logger.warning(f"Error closing pubsub for {agent_run_id}: {str(e)}")
 
-        print(f"  🗑️ 清理Redis资源...")
         # Set TTL on the response list in Redis
         await _cleanup_redis_response_list(agent_run_id)
-        print(f"    ✅ Redis响应列表TTL设置完成")
+ 
 
         # Remove the instance-specific active run key
         await _cleanup_redis_instance_key(agent_run_id)
-        print(f"    ✅ 实例活跃键清理完成")
+   
 
         # Clean up the run lock
         await _cleanup_redis_run_lock(agent_run_id)
-        print(f"    ✅ 运行锁清理完成")
 
-        print(f"  ⏳ 等待待处理Redis操作完成...")
         # Wait for all pending redis operations to complete, with timeout
         try:
             await asyncio.wait_for(asyncio.gather(*pending_redis_operations), timeout=30.0)
-            print(f"    ✅ 所有待处理Redis操作完成")
         except asyncio.TimeoutError:
-            print(f"    ⚠️ 等待Redis操作超时")
             logger.warning(f"Timeout waiting for pending Redis operations for {agent_run_id}")
 
-        print(f"🎯 ===== 后台Agent任务完全结束 =====")
-        print(f"  📋 agent_run_id: {agent_run_id}")
-        print(f"  🆔 instance_id: {instance_id}")
-        print(f"  📊 最终状态: {final_status}")
-        print(f"  ⏱️ 总运行时长: {(datetime.now(timezone.utc) - start_time).total_seconds():.2f}秒")
-        print(f"  📈 总响应数量: {total_responses}")
-        print(f"🏆 ===== 任务完成 =====")
 
         logger.info(f"Agent run background task fully completed for: {agent_run_id} (Instance: {instance_id}) with final status: {final_status}")
 

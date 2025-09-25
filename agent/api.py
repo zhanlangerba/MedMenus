@@ -83,25 +83,14 @@ from utils.constants import MODEL_NAME_ALIASES
 from flags.flags import is_enabled
 
 from .config_helper import extract_agent_config, build_unified_config, extract_tools_for_agent_run, get_mcp_configs
-# from .utils import check_agent_run_limit
-# from .versioning.version_service import get_version_service
-# from .versioning.api import router as version_router, initialize as initialize_versioning
-
-# Helper for version service
-# async def _get_version_service():
-#     return await get_version_service()
-# from utils.fufanmanus_default_agent_service import FufanmanusDefaultAgentService
-# from .tools.sb_presentation_tool_v2 import SandboxPresentationToolV2
 
 router = APIRouter()
-# router.include_router(version_router)
 
 db = None
 instance_id = None # Global instance ID for this backend instance
 
 # TTL for Redis response lists (24 hours)
 REDIS_RESPONSE_LIST_TTL = 3600 * 24
-
 
 class AgentStartRequest(BaseModel):
     model_name: Optional[str] = None  # Will be set from config.MODEL_TO_USE in the endpoint
@@ -1149,7 +1138,6 @@ async def generate_and_update_project_name(project_id: str, prompt: str):
     # TODO
     pass
     
-
 @router.post("/agent/initiate", response_model=InitiateAgentResponse)
 async def initiate_agent_with_files(
     prompt: str = Form(...),  
@@ -1190,6 +1178,7 @@ async def initiate_agent_with_files(
         logger.info(f"Upload Files {i+1}: {file.filename} (size: {file.size if hasattr(file, 'size') else 'unknown'} bytes, type: {file.content_type})")
     
     global instance_id
+
     logger.info(f"Current instance_id: {instance_id}")
     if not instance_id:
         logger.error("Agent API not initialized with instance ID")
@@ -1212,7 +1201,7 @@ async def initiate_agent_with_files(
     client = await db.client
     logger.info(f"Database connection successful, account_id: {user_id}")
     
-    # 4: 加载Agent配置（支持版本管理）
+    # 4: TODO：加载Agent配置（支持版本管理，注：此版本还未实现）
     agent_config = None
     logger.info(f"Requested agent_id: {agent_id}")
 
@@ -1345,15 +1334,11 @@ async def initiate_agent_with_files(
     # 模型使用分析：model usage analysis check
 
     try:
-        logger.info(f"Creating project and database record")
-        
         # 5. 创建项目并生成项目ID,并插入到数据库中。注意：此操作仅用于初始化占位符
         placeholder_name = f"{prompt[:30]}..." if len(prompt) > 30 else prompt if prompt else "new conversation"
-        logger.info(f"New Project name: {placeholder_name}")
         
         project_id = str(uuid.uuid4())
-        logger.info(f"Generated New project ID: {project_id}")
-        
+
         # 插入项目数据到数据库中
         project = await client.schema('public').table('projects').insert({
             "project_id": project_id, 
@@ -3906,7 +3891,6 @@ async def get_thread_messages(
         logger.error(f"Error fetching messages for thread {thread_id}: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to fetch messages: {str(e)}")
 
-
 @router.get("/agent-runs/{agent_run_id}")
 async def get_agent_run(
     agent_run_id: str,
@@ -3928,7 +3912,6 @@ async def get_agent_run(
     except Exception as e:
         logger.error(f"Error fetching agent run {agent_run_id}: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to fetch agent run: {str(e)}")  
-
 
 @router.post("/threads/{thread_id}/messages/add")
 async def add_message_to_thread(
@@ -3956,7 +3939,6 @@ async def add_message_to_thread(
     except Exception as e:
         logger.error(f"Error adding message to thread {thread_id}: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to add message: {str(e)}")
-
 
 @router.post("/threads/{thread_id}/messages")
 async def create_message(
@@ -4010,7 +3992,6 @@ async def create_message(
     except Exception as e:
         logger.error(f"Error creating message in thread {thread_id}: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to create message: {str(e)}")
-
 
 @router.delete("/threads/{thread_id}/messages/{message_id}")
 async def delete_message(
@@ -4248,7 +4229,6 @@ async def upload_agent_profile_image(
         logger.error(f"Failed to upload agent profile image for user {user_id}: {e}")
         raise HTTPException(status_code=500, detail="Failed to upload profile image")
 
-
 async def _create_adk_session_if_not_exists(client, user_id: str, session_id: str, app_name: str = "fufanmanus"):
     """如果ADK session不存在则创建"""
     try:
@@ -4330,7 +4310,6 @@ async def _log_adk_user_message_event(client, user_id: str, message_content: str
     except Exception as e:
         logger.error(f"Record user message event failed: {e}")
         raise
-
 
 async def _log_adk_agent_response_event(client, user_id: str, response_content: str, session_id: str, model_name: str, app_name: str = "fufanmanus"):
     """记录AI代理回复事件到ADK events表"""
@@ -4555,7 +4534,6 @@ def _format_messages_from_table(messages):
     logger.info(f"🔗 更新了 {updated_tool_count} 个tool消息的关联")
     
     return formatted_messages
-
 
 def _convert_user_events_to_messages(events):
     """将用户events转换为前端期望的消息格式"""

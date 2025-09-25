@@ -62,9 +62,10 @@ async def lifespan(app: FastAPI):
             instance_id
         )
 
-        sandbox_api.initialize(db)
+        # sandbox_api.initialize(db)
         
-        # 初始化triggers API（如果需要的话）
+        # 初始化triggers API
+        # 触发器组件，用于触发工作流执行（基于ADK可以省略大部分的触发器工作流）
         try:
             triggers_api.initialize(db)
             logger.info("Triggers API initialized successfully")
@@ -86,7 +87,7 @@ async def lifespan(app: FastAPI):
             logger.error(f"Error closing Redis connection: {e}")
         
         # 清理数据库连接
-        logger.info("正在断开数据库连接")
+        logger.info("Closing PostgreSQL database connection")
         await db.disconnect()
     except Exception as e:
         logger.error(f"Error during application startup: {e}")
@@ -170,7 +171,6 @@ api_router.include_router(sandbox_api.router)
 
 from triggers import api as triggers_api
 api_router.include_router(triggers_api.router)
-# api_router.include_router(billing_api.router)
 
 # api_router.include_router(api_keys_api.router)
 

@@ -1,6 +1,0 @@
-# PPIP/E2B 沙箱服务 - 使用支持 Desktop 功能的包
-e2b>=0.17.0
-# e2b-code-interpreter==1.5.1  # 备用：代码解释器专用
- 
-# 移除或注释掉 Daytona 相关依赖
-# daytona-sdk 
