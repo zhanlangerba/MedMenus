@@ -30,7 +30,7 @@ run_config = RunConfig(streaming_mode=streaming_mode)
 # 创建LiteLlm模型
 model = LiteLlm(
     model="openai/gpt-4o",
-    api_key="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"
+    api_key="your_openai_api_key_here"
 )
 
 # 定义回调函数来提取 invocation_id
